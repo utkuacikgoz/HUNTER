@@ -5,9 +5,8 @@ Main orchestrator that ties scraping, Telegram, auto-apply, and tracking togethe
 import asyncio
 import logging
 import signal
-import shutil
 import sys
-from datetime import datetime
+from datetime import datetime, UTC
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -31,7 +30,6 @@ from tracker.database import (
     get_pending_jobs,
     get_approved_jobs,
     get_stats,
-    job_url_exists,
     log_action,
 )
 from scraper.linkedin import LinkedInScraper
@@ -99,21 +97,20 @@ async def hunt():
             logger.error(f"Scraper {scraper.platform_name} failed: {e}")
             continue
 
-    # Deduplicate and insert into DB
+    # Deduplicate and insert into DB (INSERT OR IGNORE handles dupes)
     new_count = 0
     for job in all_jobs:
-        if not job_url_exists(job["url"]):
-            job_id = insert_job(
-                title=job["title"],
-                company=job["company"],
-                location=job["location"],
-                salary=job["salary"],
-                url=job["url"],
-                platform=job["platform"],
-                description=job.get("description", ""),
-            )
-            if job_id:
-                new_count += 1
+        job_id = insert_job(
+            title=job["title"],
+            company=job["company"],
+            location=job["location"],
+            salary=job["salary"],
+            url=job["url"],
+            platform=job["platform"],
+            description=job.get("description", ""),
+        )
+        if job_id:
+            new_count += 1
 
         if new_count >= MAX_JOBS_PER_DAY:
             break
@@ -233,8 +230,11 @@ async def bot():
 
     # --- Telegram command handlers ---
     from telegram.ext import CommandHandler
+    from telegram_bot.bot import _is_authorized
 
     async def cmd_hunt(update, context):
+        if not _is_authorized(update):
+            return
         await update.message.reply_text("Starting job hunt... This may take a few minutes.")
         results = await hunt()
         await update.message.reply_text(
@@ -245,6 +245,8 @@ async def bot():
         )
 
     async def cmd_apply(update, context):
+        if not _is_authorized(update):
+            return
         approved = get_approved_jobs()
         if not approved:
             await update.message.reply_text("No approved jobs. Review pending jobs first!")
@@ -258,6 +260,8 @@ async def bot():
         )
 
     async def cmd_review(update, context):
+        if not _is_authorized(update):
+            return
         pending = get_pending_jobs(limit=50)
         if not pending:
             await update.message.reply_text("No pending jobs. Run /hunt first!")
@@ -265,6 +269,8 @@ async def bot():
         await send_jobs_batch(pending)
 
     async def cmd_schedule(update, context):
+        if not _is_authorized(update):
+            return
         jobs_info = []
         for job in scheduler.get_jobs():
             next_run = job.next_run_time.strftime("%Y-%m-%d %H:%M") if job.next_run_time else "paused"
@@ -297,7 +303,7 @@ async def bot():
         await shutdown_event.wait()
     finally:
         logger.info("Shutting down...")
-        scheduler.shutdown(wait=False)
+        scheduler.shutdown(wait=True)
         await app.updater.stop()
         await app.stop()
         await app.shutdown()
@@ -310,13 +316,20 @@ def backup_database():
         logger.warning("No database file to back up")
         return
     DB_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     dest = DB_BACKUP_DIR / f"hunter_{timestamp}.db"
-    shutil.copy2(str(DB_PATH), str(dest))
+    import sqlite3
+    src_conn = sqlite3.connect(str(DB_PATH))
+    dst_conn = sqlite3.connect(str(dest))
+    try:
+        src_conn.backup(dst_conn)
+    finally:
+        dst_conn.close()
+        src_conn.close()
     logger.info(f"Database backed up to {dest}")
 
     # Prune backups older than 30 days
-    cutoff = datetime.utcnow().timestamp() - (30 * 86400)
+    cutoff = datetime.now(UTC).timestamp() - (30 * 86400)
     for f in DB_BACKUP_DIR.glob("hunter_*.db"):
         if f.stat().st_mtime < cutoff:
             f.unlink()
@@ -349,7 +362,7 @@ Usage:
         "followup": followup,
         "stats": stats,
         "bot": bot,
-        "backup": lambda: asyncio.coroutine(lambda: backup_database())(),
+        "backup": None,  # handled separately below
     }
 
     if command not in commands:

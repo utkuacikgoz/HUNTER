@@ -41,6 +41,12 @@ class AutoApplicant:
         platform = job.get("platform", "")
         job_id = job["id"]
 
+        # Guard against duplicate apply attempts
+        fresh = get_job_by_id(job_id)
+        if fresh and fresh.get("status") == "applied":
+            logger.info(f"Already applied to job {job_id}, skipping")
+            return True
+
         logger.info(f"Applying to: {job['title']} at {job['company']} ({platform})")
 
         try:
@@ -169,7 +175,10 @@ class AutoApplicant:
                 pass
             return False
         finally:
-            await page.close()
+            try:
+                await page.close()
+            except Exception:
+                pass
             await context.close()
 
     async def _fill_linkedin_fields(self, page: Page, cover_letter: str):
@@ -300,7 +309,10 @@ class AutoApplicant:
             logger.error(f"Indeed apply error: {e}")
             return False
         finally:
-            await page.close()
+            try:
+                await page.close()
+            except Exception:
+                pass
             await context.close()
 
     async def _apply_wellfound(self, job: dict, cover_letter: str) -> bool:
@@ -329,7 +341,10 @@ class AutoApplicant:
             logger.error(f"Wellfound apply error: {e}")
             return False
         finally:
-            await page.close()
+            try:
+                await page.close()
+            except Exception:
+                pass
             await context.close()
 
     async def _apply_generic(self, job: dict, cover_letter: str) -> bool:
@@ -360,7 +375,10 @@ class AutoApplicant:
             logger.error(f"Generic apply error: {e}")
             return False
         finally:
-            await page.close()
+            try:
+                await page.close()
+            except Exception:
+                pass
             await context.close()
 
     async def _fill_generic_form(self, page: Page, job: dict, cover_letter: str):
@@ -397,6 +415,12 @@ class AutoApplicant:
                 await file_input.set_input_files(str(RESUME_PATH))
             except Exception:
                 pass
+
+
+async def apply_to_single_job(job: dict, headless=True) -> bool:
+    """Apply to a single approved job. Returns True on success."""
+    async with AutoApplicant(headless=headless) as applicant:
+        return await applicant.apply_to_job(job)
 
 
 async def apply_to_approved_jobs(jobs: list[dict], headless=True) -> dict:

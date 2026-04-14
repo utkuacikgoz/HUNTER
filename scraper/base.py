@@ -4,6 +4,7 @@ import logging
 import random
 from abc import ABC, abstractmethod
 from playwright.async_api import async_playwright, Browser, Page
+from urllib.parse import urlparse
 from config.settings import (
     PROXY_URL,
     SCRAPE_DELAY_MIN,
@@ -12,6 +13,8 @@ from config.settings import (
 )
 
 logger = logging.getLogger(__name__)
+
+_BLOCKED_PROXY_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "169.254.169.254", "metadata.google.internal"}
 
 
 class BaseScraper(ABC):
@@ -31,6 +34,11 @@ class BaseScraper(ABC):
             "args": ["--disable-blink-features=AutomationControlled"],
         }
         if PROXY_URL:
+            parsed = urlparse(PROXY_URL)
+            if parsed.scheme not in ("http", "https", "socks5"):
+                raise ValueError(f"Invalid proxy scheme: {parsed.scheme}")
+            if parsed.hostname and parsed.hostname.lower() in _BLOCKED_PROXY_HOSTS:
+                raise ValueError("Proxy to internal/metadata networks is blocked")
             launch_kwargs["proxy"] = {"server": PROXY_URL}
         self._browser = await self._playwright.chromium.launch(**launch_kwargs)
         return self

@@ -17,13 +17,13 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 # --- LinkedIn ---
 LINKEDIN_SESSION_COOKIE = os.getenv("LINKEDIN_SESSION_COOKIE", "")
 
-# --- OpenAI ---
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+# --- Anthropic Claude ---
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 # --- Job preferences ---
 TARGET_ROLE = os.getenv("TARGET_ROLE", "Senior Product Manager")
 MIN_SALARY = int(os.getenv("MIN_SALARY", "80000"))
-LOCATIONS = [loc.strip() for loc in os.getenv("LOCATIONS", "EMEA,Remote,US").split(",")]
+LOCATIONS = [loc.strip() for loc in os.getenv("LOCATIONS", "EMEA,Remote,US").split(",") if loc.strip()]
 MAX_JOBS_PER_DAY = int(os.getenv("MAX_JOBS_PER_DAY", "50"))
 
 # --- Anti-detection ---
@@ -100,9 +100,9 @@ def validate_config(command: str) -> list[str]:
             errors.append("TELEGRAM_CHAT_ID is required. Send a message to your bot, then check getUpdates API.")
 
     if command in ("apply", "bot"):
-        if not OPENAI_API_KEY:
+        if not ANTHROPIC_API_KEY:
             logging.getLogger(__name__).warning(
-                "OPENAI_API_KEY not set. Cover letters will use fallback template."
+                "ANTHROPIC_API_KEY not set. Cover letters will use fallback template."
             )
         if not RESUME_TEXT:
             errors.append("Resume text not found. Create config/resume.txt or set RESUME_TEXT env var.")

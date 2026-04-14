@@ -8,6 +8,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
 )
+from applicant.engine import apply_to_single_job
 from config.settings import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 from tracker.database import (
     get_pending_jobs,
@@ -245,6 +246,30 @@ async def cmd_followups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_followup_reminders()
 
 
+_active_apply_tasks: set = set()
+
+
+async def _auto_apply(query, job_id: int, job: dict):
+    """Background task: apply to a single job after approval."""
+    task = asyncio.current_task()
+    _active_apply_tasks.add(task)
+    try:
+        success = await apply_to_single_job(job, headless=True)
+        if success:
+            text = f"\u2705 *APPLIED*\n{job['title']} @ {job['company']}"
+        else:
+            text = f"\u26a0\ufe0f *APPLY INCOMPLETE*\n{job['title']} @ {job['company']}\nUse link to apply manually"
+    except Exception as e:
+        logger.error(f"Auto-apply failed for job {job_id}: {e}")
+        text = f"\u274c *APPLY FAILED*\n{job['title']} @ {job['company']}\n{str(e)[:100]}"
+    finally:
+        _active_apply_tasks.discard(task)
+    try:
+        await query.edit_message_text(text=text, parse_mode="Markdown")
+    except Exception:
+        logger.debug(f"Could not update message for job {job_id}")
+
+
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle inline keyboard button presses."""
     query = update.callback_query
@@ -252,6 +277,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Auth check FIRST: only allow the configured chat to interact
     if str(query.message.chat_id) != str(TELEGRAM_CHAT_ID):
         logger.warning(f"Unauthorized callback from chat_id={query.message.chat_id}")
+        await query.answer(text="Unauthorized", show_alert=True)
         return
 
     await query.answer()
@@ -276,10 +302,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "approve":
         approve_job(job_id)
+        title_esc = _escape_md(job['title'])
+        company_esc = _escape_md(job['company'])
+        dots = r"\.\.\."
         await query.edit_message_text(
-            text=f"✅ *APPROVED*\n{job['title']} @ {job['company']}",
-            parse_mode="Markdown",
+            text=f"\u2705 *APPROVED* \u2014 applying{dots}\n{title_esc} @ {company_esc}",
+            parse_mode="MarkdownV2",
         )
+        # Auto-apply in background
+        asyncio.create_task(_auto_apply(query, job_id, job))
     elif action == "reject":
         reject_job(job_id)
         await query.edit_message_text(

@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from config.settings import DB_PATH, FOLLOWUP_DAYS
 
 
@@ -61,12 +61,16 @@ def insert_job(title, company, location, salary, url, platform, description=""):
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (title, company, location, salary, url, platform, description),
         )
-        conn.commit()
+        was_inserted = conn.execute("SELECT changes()").fetchone()[0] > 0
+        if not was_inserted:
+            conn.commit()
+            return None
         cursor = conn.execute("SELECT id FROM jobs WHERE url = ?", (url,))
         row = cursor.fetchone()
         job_id = row["id"] if row else None
         if job_id:
             log_action(job_id, "scraped", f"Scraped from {platform}", conn=conn)
+        conn.commit()
         return job_id
     finally:
         conn.close()
@@ -81,8 +85,8 @@ def log_action(job_id, action, detail="", conn=None):
         "INSERT INTO application_log (job_id, action, detail) VALUES (?, ?, ?)",
         (job_id, action, detail),
     )
-    conn.commit()
     if should_close:
+        conn.commit()
         conn.close()
 
 
@@ -117,7 +121,7 @@ def update_job_status(job_id, status):
         raise ValueError(f"Invalid job_id: {job_id}")
     conn = get_connection()
     try:
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(UTC).isoformat()
         if status == "applied":
             conn.execute(
                 "UPDATE jobs SET status = ?, applied_at = ? WHERE id = ?",
@@ -155,13 +159,13 @@ def set_cover_letter(job_id, cover_letter):
 def get_jobs_needing_followup():
     conn = get_connection()
     try:
-        cutoff = (datetime.utcnow() - timedelta(days=FOLLOWUP_DAYS)).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(days=FOLLOWUP_DAYS)).isoformat()
         rows = conn.execute(
             """SELECT * FROM jobs
                WHERE status = 'applied'
                AND (
-                   (last_followup_at IS NULL AND applied_at <= ?)
-                   OR (last_followup_at IS NOT NULL AND last_followup_at <= ?)
+                   (last_followup_at IS NULL AND datetime(applied_at) <= datetime(?))
+                   OR (last_followup_at IS NOT NULL AND datetime(last_followup_at) <= datetime(?))
                )
                ORDER BY applied_at ASC""",
             (cutoff, cutoff),
@@ -174,7 +178,7 @@ def get_jobs_needing_followup():
 def record_followup(job_id):
     conn = get_connection()
     try:
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(UTC).isoformat()
         conn.execute(
             "UPDATE jobs SET last_followup_at = ?, followup_count = followup_count + 1 WHERE id = ?",
             (now, job_id),
@@ -188,23 +192,23 @@ def record_followup(job_id):
 def get_stats():
     conn = get_connection()
     try:
-        stats = {}
-        for status in ["pending", "approved", "rejected", "applied", "interviewing", "offered", "closed"]:
-            row = conn.execute(
-                "SELECT COUNT(*) as c FROM jobs WHERE status = ?", (status,)
-            ).fetchone()
-            stats[status] = row["c"]
-        stats["total"] = sum(stats.values())
+        rows = conn.execute(
+            "SELECT status, COUNT(*) as c FROM jobs GROUP BY status"
+        ).fetchall()
+        stats = {row["status"]: row["c"] for row in rows}
+        for s in ["pending", "approved", "rejected", "applied", "interviewing", "offered", "closed"]:
+            stats.setdefault(s, 0)
+        stats["total"] = sum(stats[s] for s in ["pending", "approved", "rejected", "applied", "interviewing", "offered", "closed"])
 
         row = conn.execute(
-            "SELECT COUNT(*) as c FROM jobs WHERE applied_at >= date('now', '-7 days')"
+            "SELECT COUNT(*) as c FROM jobs WHERE datetime(applied_at) >= datetime('now', '-7 days')"
         ).fetchone()
-        stats["applied_this_week"] = row["c"]
+        stats["applied_this_week"] = row["c"] if row else 0
 
         row = conn.execute(
-            "SELECT COUNT(*) as c FROM jobs WHERE applied_at >= date('now', '-30 days')"
+            "SELECT COUNT(*) as c FROM jobs WHERE datetime(applied_at) >= datetime('now', '-30 days')"
         ).fetchone()
-        stats["applied_this_month"] = row["c"]
+        stats["applied_this_month"] = row["c"] if row else 0
 
         return stats
     finally:

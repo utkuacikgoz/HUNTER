@@ -21,8 +21,12 @@ RUN pip install --no-cache-dir -r requirements.txt \
 
 COPY . .
 
-# Create dirs
-RUN mkdir -p screenshots config
+# Create non-root user and dirs
+RUN useradd -m -u 1000 hunter \
+    && mkdir -p screenshots config backups \
+    && chown -R hunter:hunter /app
+
+USER hunter
 
 VOLUME ["/app/config", "/app/screenshots"]
 

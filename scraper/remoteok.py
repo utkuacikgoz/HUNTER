@@ -32,7 +32,11 @@ class RemoteOKScraper(BaseScraper):
                 if resp.status != 200:
                     logger.warning(f"RemoteOK: status {resp.status}")
                     return None
-                return await resp.json(content_type=None)
+                try:
+                    return await resp.json(content_type=None)
+                except Exception as e:
+                    logger.error(f"RemoteOK: invalid JSON response: {e}")
+                    return None
 
     async def scrape(self, query: str, location: str = "", max_results: int = 10) -> list[dict]:
         jobs = []
@@ -61,10 +65,13 @@ class RemoteOKScraper(BaseScraper):
                     salary_min = item.get("salary_min", "")
                     salary_max = item.get("salary_max", "")
                     salary = ""
-                    if salary_min and salary_max:
-                        salary = f"${salary_min:,} - ${salary_max:,}"
-                    elif salary_min:
-                        salary = f"${salary_min:,}+"
+                    try:
+                        if salary_min and salary_max:
+                            salary = f"${int(salary_min):,} - ${int(salary_max):,}"
+                        elif salary_min:
+                            salary = f"${int(salary_min):,}+"
+                    except (ValueError, TypeError):
+                        salary = str(salary_min) if salary_min else ""
                     loc = ", ".join(item.get("location", "Remote").split()) if item.get("location") else "Remote"
                     slug = item.get("slug", "")
                     url = f"https://remoteok.com/remote-jobs/{slug}" if slug else item.get("url", "")
