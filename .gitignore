@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.db
+*.log
+config/resume.pdf
+config/resume.txt
+.playwright/
+screenshots/
+backups/
+node_modules/

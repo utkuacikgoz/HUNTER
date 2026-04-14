@@ -1,0 +1,21 @@
+services:
+  hunter:
+    build: .
+    container_name: hunter-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./config:/app/config:ro
+      - ./screenshots:/app/screenshots
+      - hunter-db:/app/data
+    environment:
+      - DB_PATH=/app/data/hunter.db
+    command: ["bot"]
+
+  # One-off commands:
+  #   docker compose run --rm hunter hunt
+  #   docker compose run --rm hunter apply
+  #   docker compose run --rm hunter stats
+
+volumes:
+  hunter-db:
