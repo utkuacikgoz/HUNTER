@@ -2,11 +2,21 @@
 import logging
 import asyncio
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from playwright.async_api import async_playwright, Page, TimeoutError as PWTimeout
 from config.settings import LINKEDIN_SESSION_COOKIE, RESUME_PATH
 from tracker.database import mark_applied, set_cover_letter, log_action, get_job_by_id
 from prompts.generator import generate_cover_letter, generate_form_answer, COMMON_ANSWERS
+
+
+@dataclass
+class ApplyResult:
+    """Result of an apply attempt."""
+    success: bool
+    method: str  # 'easy_apply', 'form_filled', 'screenshot_only', 'external_redirect'
+    screenshot_path: str | None = None
+    message: str = ""
 
 logger = logging.getLogger(__name__)
 
@@ -57,28 +67,28 @@ class AutoApplicant:
             set_cover_letter(job_id, cover_letter)
 
             if platform == "linkedin":
-                success = await self._apply_linkedin(job, cover_letter)
+                result = await self._apply_linkedin(job, cover_letter)
             elif platform == "indeed":
-                success = await self._apply_indeed(job, cover_letter)
+                result = await self._apply_indeed(job, cover_letter)
             elif platform == "wellfound":
-                success = await self._apply_wellfound(job, cover_letter)
+                result = await self._apply_wellfound(job, cover_letter)
             else:
-                # Generic: open page+screenshot, mark for manual follow-up
-                success = await self._apply_generic(job, cover_letter)
+                result = await self._apply_generic(job, cover_letter)
 
-            if success:
+            if result.success:
                 mark_applied(job_id)
-                logger.info(f"✅ Applied: {job['title']} at {job['company']}")
+                log_action(job_id, "applied", f"method={result.method}: {result.message}")
+                logger.info(f"✅ Applied ({result.method}): {job['title']} at {job['company']}")
             else:
-                log_action(job_id, "apply_failed", "Auto-apply did not complete")
-                logger.warning(f"⚠️ Apply incomplete: {job['title']} at {job['company']}")
+                log_action(job_id, "apply_failed", f"method={result.method}: {result.message}")
+                logger.warning(f"⚠️ Apply incomplete ({result.method}): {job['title']} at {job['company']}")
 
-            return success
+            return result
 
         except Exception as e:
             logger.error(f"Apply error for job {job_id}: {e}")
             log_action(job_id, "apply_failed", str(e)[:500])
-            return False
+            return ApplyResult(success=False, method="error", message=str(e)[:200])
 
     async def _new_context(self, cookies=None):
         context = await self._browser.new_context(
@@ -120,11 +130,14 @@ class AutoApplicant:
 
             if not easy_apply:
                 logger.info(f"No Easy Apply for {job['title']} - taking screenshot for manual apply")
-                await page.screenshot(path=str(SCREENSHOTS_DIR / f"linkedin_{job['id']}.png"))
+                ss_path = str(SCREENSHOTS_DIR / f"linkedin_{job['id']}.png")
+                await page.screenshot(path=ss_path)
                 await page.close()
                 await context.close()
-                # Still mark as applied since we opened it
-                return True
+                return ApplyResult(
+                    success=False, method="screenshot_only", screenshot_path=ss_path,
+                    message="No Easy Apply button found. Needs manual application.",
+                )
 
             await easy_apply.click()
             await asyncio.sleep(2)
@@ -149,8 +162,13 @@ class AutoApplicant:
                         "div:has-text('Application submitted')"
                     )
                     if success_el:
+                        ss_path = str(SCREENSHOTS_DIR / f"linkedin_{job['id']}_success.png")
+                        await page.screenshot(path=ss_path)
                         logger.info("LinkedIn Easy Apply submitted successfully")
-                        return True
+                        return ApplyResult(
+                            success=True, method="easy_apply", screenshot_path=ss_path,
+                            message="Easy Apply form submitted and confirmed.",
+                        )
 
                 # Click Next/Review
                 next_btn = await page.query_selector(
@@ -164,16 +182,24 @@ class AutoApplicant:
                 else:
                     break
 
-            await page.screenshot(path=str(SCREENSHOTS_DIR / f"linkedin_{job['id']}_final.png"))
-            return True
+            ss_path = str(SCREENSHOTS_DIR / f"linkedin_{job['id']}_final.png")
+            await page.screenshot(path=ss_path)
+            return ApplyResult(
+                success=False, method="form_filled", screenshot_path=ss_path,
+                message="Easy Apply form opened but could not confirm submission.",
+            )
 
         except Exception as e:
             logger.error(f"LinkedIn apply error: {e}")
+            ss_path = str(SCREENSHOTS_DIR / f"linkedin_{job['id']}_error.png")
             try:
-                await page.screenshot(path=str(SCREENSHOTS_DIR / f"linkedin_{job['id']}_error.png"))
+                await page.screenshot(path=ss_path)
             except Exception:
-                pass
-            return False
+                ss_path = None
+            return ApplyResult(
+                success=False, method="error", screenshot_path=ss_path,
+                message=str(e)[:200],
+            )
         finally:
             try:
                 await page.close()
@@ -274,7 +300,7 @@ class AutoApplicant:
 
         return ""
 
-    async def _apply_indeed(self, job: dict, cover_letter: str) -> bool:
+    async def _apply_indeed(self, job: dict, cover_letter: str) -> ApplyResult:
         """Apply via Indeed."""
         context = await self._new_context()
         page = await context.new_page()
@@ -290,24 +316,39 @@ class AutoApplicant:
                 "a:has-text('Apply on company site')"
             )
 
+            method = "screenshot_only"
+            message = "Job page opened but no application was submitted."
+
             if apply_btn:
+                btn_text = (await apply_btn.inner_text()).strip().lower()
                 href = await apply_btn.get_attribute("href")
-                if href:
-                    # External application
-                    await page.goto(href, wait_until="domcontentloaded", timeout=20000)
-                    await asyncio.sleep(2)
+                if href or "company site" in btn_text:
+                    # External application - can't auto-apply
+                    if href:
+                        await page.goto(href, wait_until="domcontentloaded", timeout=20000)
+                        await asyncio.sleep(2)
+                    method = "external_redirect"
+                    message = f"Redirected to external site. Needs manual application."
                 else:
                     await apply_btn.click()
                     await asyncio.sleep(2)
+                    # Fill any visible forms
+                    await self._fill_generic_form(page, job, cover_letter)
+                    method = "form_filled"
+                    message = "Applied via Indeed form (unconfirmed)."
 
-            # Fill any visible forms
-            await self._fill_generic_form(page, job, cover_letter)
-            await page.screenshot(path=str(SCREENSHOTS_DIR / f"indeed_{job['id']}.png"))
-            return True
+            ss_path = str(SCREENSHOTS_DIR / f"indeed_{job['id']}.png")
+            await page.screenshot(path=ss_path)
+
+            actually_applied = method == "form_filled"
+            return ApplyResult(
+                success=actually_applied, method=method,
+                screenshot_path=ss_path, message=message,
+            )
 
         except Exception as e:
             logger.error(f"Indeed apply error: {e}")
-            return False
+            return ApplyResult(success=False, method="error", message=str(e)[:200])
         finally:
             try:
                 await page.close()
@@ -315,7 +356,7 @@ class AutoApplicant:
                 pass
             await context.close()
 
-    async def _apply_wellfound(self, job: dict, cover_letter: str) -> bool:
+    async def _apply_wellfound(self, job: dict, cover_letter: str) -> ApplyResult:
         """Apply via Wellfound."""
         context = await self._new_context()
         page = await context.new_page()
@@ -329,17 +370,28 @@ class AutoApplicant:
                 "a:has-text('Apply')"
             )
 
+            method = "screenshot_only"
+            message = "Job page opened but no apply button found."
+
             if apply_btn:
                 await apply_btn.click()
                 await asyncio.sleep(2)
+                await self._fill_generic_form(page, job, cover_letter)
+                method = "form_filled"
+                message = "Apply button clicked and form filled (unconfirmed)."
 
-            await self._fill_generic_form(page, job, cover_letter)
-            await page.screenshot(path=str(SCREENSHOTS_DIR / f"wellfound_{job['id']}.png"))
-            return True
+            ss_path = str(SCREENSHOTS_DIR / f"wellfound_{job['id']}.png")
+            await page.screenshot(path=ss_path)
+
+            actually_applied = method == "form_filled"
+            return ApplyResult(
+                success=actually_applied, method=method,
+                screenshot_path=ss_path, message=message,
+            )
 
         except Exception as e:
             logger.error(f"Wellfound apply error: {e}")
-            return False
+            return ApplyResult(success=False, method="error", message=str(e)[:200])
         finally:
             try:
                 await page.close()
@@ -347,7 +399,7 @@ class AutoApplicant:
                 pass
             await context.close()
 
-    async def _apply_generic(self, job: dict, cover_letter: str) -> bool:
+    async def _apply_generic(self, job: dict, cover_letter: str) -> ApplyResult:
         """Generic apply: open page, fill forms, screenshot."""
         context = await self._new_context()
         page = await context.new_page()
@@ -363,17 +415,29 @@ class AutoApplicant:
                 "button[class*='apply'], "
                 "a[class*='apply']"
             )
+
+            method = "screenshot_only"
+            message = "Job page opened. Needs manual application."
+
             if apply_btn:
                 await apply_btn.click()
                 await asyncio.sleep(2)
+                await self._fill_generic_form(page, job, cover_letter)
+                method = "form_filled"
+                message = "Apply button clicked and form filled (unconfirmed)."
 
-            await self._fill_generic_form(page, job, cover_letter)
-            await page.screenshot(path=str(SCREENSHOTS_DIR / f"generic_{job['id']}.png"))
-            return True
+            ss_path = str(SCREENSHOTS_DIR / f"generic_{job['id']}.png")
+            await page.screenshot(path=ss_path)
+
+            # Generic applies are never confirmed — mark as needing manual review
+            return ApplyResult(
+                success=False, method=method, screenshot_path=ss_path,
+                message=message,
+            )
 
         except Exception as e:
             logger.error(f"Generic apply error: {e}")
-            return False
+            return ApplyResult(success=False, method="error", message=str(e)[:200])
         finally:
             try:
                 await page.close()
@@ -417,21 +481,23 @@ class AutoApplicant:
                 pass
 
 
-async def apply_to_single_job(job: dict, headless=True) -> bool:
-    """Apply to a single approved job. Returns True on success."""
+async def apply_to_single_job(job: dict, headless=True) -> ApplyResult:
+    """Apply to a single approved job. Returns ApplyResult."""
     async with AutoApplicant(headless=headless) as applicant:
         return await applicant.apply_to_job(job)
 
 
 async def apply_to_approved_jobs(jobs: list[dict], headless=True) -> dict:
     """Apply to all approved jobs and return results summary."""
-    results = {"success": 0, "failed": 0, "total": len(jobs)}
+    results = {"success": 0, "failed": 0, "needs_manual": 0, "total": len(jobs)}
 
     async with AutoApplicant(headless=headless) as applicant:
         for job in jobs:
-            success = await applicant.apply_to_job(job)
-            if success:
+            result = await applicant.apply_to_job(job)
+            if result.success:
                 results["success"] += 1
+            elif result.method in ("screenshot_only", "external_redirect"):
+                results["needs_manual"] += 1
             else:
                 results["failed"] += 1
             # Rate limiting between applications

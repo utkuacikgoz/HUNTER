@@ -68,9 +68,9 @@ async def hunt():
     all_jobs = []
 
     scrapers = [
-        LinkedInScraper(headless=True),
-        IndeedScraper(headless=True),
-        GlassdoorScraper(headless=True),
+        # LinkedInScraper(headless=True),  # Skipped - cookie issues
+        # IndeedScraper(headless=True),  # Skipped
+        # GlassdoorScraper(headless=True),  # Skipped
         WellfoundScraper(headless=True),
         RemoteOKScraper(headless=True),
     ]
@@ -133,13 +133,13 @@ async def apply():
     approved = get_approved_jobs()
     if not approved:
         logger.info("No approved jobs to apply to")
-        return {"total": 0, "success": 0, "failed": 0}
+        return {"total": 0, "success": 0, "failed": 0, "needs_manual": 0}
 
     logger.info(f"🚀 Applying to {len(approved)} approved jobs...")
     results = await apply_to_approved_jobs(approved, headless=True)
     logger.info(
         f"✅ Applied: {results['success']}/{results['total']} "
-        f"(Failed: {results['failed']})"
+        f"(Failed: {results['failed']}, Needs manual: {results['needs_manual']})"
     )
 
     # Send stats after applying
