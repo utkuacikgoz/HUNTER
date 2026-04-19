@@ -1,12 +1,15 @@
 """Telegram bot for job review, approval, and notifications."""
 import logging
 import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+import os
+import pytz
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot, InputFile
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
+    Defaults,
 )
 from applicant.engine import apply_to_single_job
 from config.settings import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
@@ -254,20 +257,49 @@ async def _auto_apply(query, job_id: int, job: dict):
     task = asyncio.current_task()
     _active_apply_tasks.add(task)
     try:
-        success = await apply_to_single_job(job, headless=True)
-        if success:
-            text = f"\u2705 *APPLIED*\n{job['title']} @ {job['company']}"
+        result = await apply_to_single_job(job, headless=True)
+        method_label = {
+            "easy_apply": "Easy Apply \u2705",
+            "form_filled": "Form Filled \u2705",
+            "screenshot_only": "Screenshot Only \u2014 needs manual apply",
+            "external_redirect": "External Site \u2014 needs manual apply",
+            "error": "Error",
+        }.get(result.method, result.method)
+
+        if result.success:
+            text = f"\u2705 *APPLIED* ({method_label})\n{job['title']} @ {job['company']}\n_{result.message}_"
+        elif result.method in ("screenshot_only", "external_redirect"):
+            text = (
+                f"\u26a0\ufe0f *NEEDS MANUAL APPLY* ({method_label})\n"
+                f"{job['title']} @ {job['company']}\n"
+                f"_{result.message}_"
+            )
         else:
-            text = f"\u26a0\ufe0f *APPLY INCOMPLETE*\n{job['title']} @ {job['company']}\nUse link to apply manually"
+            text = f"\u274c *APPLY FAILED*\n{job['title']} @ {job['company']}\n_{result.message}_"
     except Exception as e:
         logger.error(f"Auto-apply failed for job {job_id}: {e}")
         text = f"\u274c *APPLY FAILED*\n{job['title']} @ {job['company']}\n{str(e)[:100]}"
+        result = None
     finally:
         _active_apply_tasks.discard(task)
+
     try:
         await query.edit_message_text(text=text, parse_mode="Markdown")
     except Exception:
         logger.debug(f"Could not update message for job {job_id}")
+
+    # Send screenshot as proof
+    if result and result.screenshot_path and os.path.exists(result.screenshot_path):
+        try:
+            bot = Bot(token=TELEGRAM_BOT_TOKEN)
+            with open(result.screenshot_path, "rb") as f:
+                await bot.send_photo(
+                    chat_id=TELEGRAM_CHAT_ID,
+                    photo=InputFile(f),
+                    caption=f"\U0001f4f8 {job['title']} @ {job['company']}\nMethod: {result.method}",
+                )
+        except Exception as e:
+            logger.debug(f"Could not send screenshot for job {job_id}: {e}")
 
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -339,7 +371,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def build_bot_app() -> Application:
     """Build and return the Telegram bot Application."""
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    defaults = Defaults(tzinfo=pytz.timezone("Europe/Istanbul"))
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).defaults(defaults).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("applied", cmd_applied))
