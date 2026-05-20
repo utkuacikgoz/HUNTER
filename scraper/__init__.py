@@ -1,8 +1,8 @@
-from scraper.linkedin import LinkedInScraper
-from scraper.indeed import IndeedScraper
 from scraper.glassdoor import GlassdoorScraper
-from scraper.wellfound import WellfoundScraper
+from scraper.indeed import IndeedScraper
+from scraper.linkedin import LinkedInScraper
 from scraper.remoteok import RemoteOKScraper
+from scraper.wellfound import WellfoundScraper
 
 __all__ = [
     "LinkedInScraper",

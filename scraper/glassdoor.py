@@ -1,6 +1,7 @@
 """Glassdoor job scraper."""
 import logging
 from urllib.parse import quote_plus
+
 from scraper.base import BaseScraper
 
 logger = logging.getLogger(__name__)

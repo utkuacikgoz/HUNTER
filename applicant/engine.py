@@ -1,13 +1,14 @@
 """Playwright-based auto-apply engine for job applications."""
-import logging
 import asyncio
-import os
+import logging
 from dataclasses import dataclass
 from pathlib import Path
-from playwright.async_api import async_playwright, Page, TimeoutError as PWTimeout
+
+from playwright.async_api import Page, async_playwright
+
 from config.settings import LINKEDIN_SESSION_COOKIE, RESUME_PATH
-from tracker.database import mark_applied, set_cover_letter, log_action, get_job_by_id
-from prompts.generator import generate_cover_letter, generate_form_answer, COMMON_ANSWERS
+from prompts.generator import COMMON_ANSWERS, generate_cover_letter
+from tracker.database import get_job_by_id, log_action, mark_applied, set_cover_letter
 
 
 @dataclass
@@ -42,9 +43,15 @@ class AutoApplicant:
 
     async def __aexit__(self, *args):
         if self._browser:
-            await self._browser.close()
+            try:
+                await self._browser.close()
+            except Exception as e:
+                logger.warning(f"AutoApplicant: browser.close failed: {e}")
         if self._playwright:
-            await self._playwright.stop()
+            try:
+                await self._playwright.stop()
+            except Exception as e:
+                logger.warning(f"AutoApplicant: playwright.stop failed: {e}")
 
     async def apply_to_job(self, job: dict) -> bool:
         """Apply to a single job. Routes to platform-specific handler."""
@@ -143,7 +150,7 @@ class AutoApplicant:
             await asyncio.sleep(2)
 
             # Process multi-step form
-            for step in range(10):  # Max 10 steps
+            for _step in range(10):  # Max 10 steps
                 # Fill in any visible form fields
                 await self._fill_linkedin_fields(page, cover_letter)
 
@@ -194,7 +201,8 @@ class AutoApplicant:
             ss_path = str(SCREENSHOTS_DIR / f"linkedin_{job['id']}_error.png")
             try:
                 await page.screenshot(path=ss_path)
-            except Exception:
+            except Exception as ss_err:
+                logger.debug(f"error screenshot failed: {ss_err}")
                 ss_path = None
             return ApplyResult(
                 success=False, method="error", screenshot_path=ss_path,
@@ -203,9 +211,12 @@ class AutoApplicant:
         finally:
             try:
                 await page.close()
-            except Exception:
-                pass
-            await context.close()
+            except Exception as e:
+                logger.debug(f"page.close failed: {e}")
+            try:
+                await context.close()
+            except Exception as e:
+                logger.debug(f"context.close failed: {e}")
 
     async def _fill_linkedin_fields(self, page: Page, cover_letter: str):
         """Fill LinkedIn Easy Apply form fields."""
@@ -247,7 +258,8 @@ class AutoApplicant:
                 if value:
                     await inp.fill(value)
                     await asyncio.sleep(0.3)
-            except Exception:
+            except Exception as e:
+                logger.debug(f"linkedin field fill skipped: {e}")
                 continue
 
         # Handle dropdowns/selects
@@ -264,7 +276,8 @@ class AutoApplicant:
                             if val:
                                 await select.select_option(val)
                                 break
-            except Exception:
+            except Exception as e:
+                logger.debug(f"linkedin select skipped: {e}")
                 continue
 
     def _match_field_value(self, field_hint: str, cover_letter: str) -> str:
@@ -328,7 +341,7 @@ class AutoApplicant:
                         await page.goto(href, wait_until="domcontentloaded", timeout=20000)
                         await asyncio.sleep(2)
                     method = "external_redirect"
-                    message = f"Redirected to external site. Needs manual application."
+                    message = "Redirected to external site. Needs manual application."
                 else:
                     await apply_btn.click()
                     await asyncio.sleep(2)
@@ -352,9 +365,12 @@ class AutoApplicant:
         finally:
             try:
                 await page.close()
-            except Exception:
-                pass
-            await context.close()
+            except Exception as e:
+                logger.debug(f"page.close failed: {e}")
+            try:
+                await context.close()
+            except Exception as e:
+                logger.debug(f"context.close failed: {e}")
 
     async def _apply_wellfound(self, job: dict, cover_letter: str) -> ApplyResult:
         """Apply via Wellfound."""
@@ -395,9 +411,12 @@ class AutoApplicant:
         finally:
             try:
                 await page.close()
-            except Exception:
-                pass
-            await context.close()
+            except Exception as e:
+                logger.debug(f"page.close failed: {e}")
+            try:
+                await context.close()
+            except Exception as e:
+                logger.debug(f"context.close failed: {e}")
 
     async def _apply_generic(self, job: dict, cover_letter: str) -> ApplyResult:
         """Generic apply: open page, fill forms, screenshot."""
@@ -441,9 +460,12 @@ class AutoApplicant:
         finally:
             try:
                 await page.close()
-            except Exception:
-                pass
-            await context.close()
+            except Exception as e:
+                logger.debug(f"page.close failed: {e}")
+            try:
+                await context.close()
+            except Exception as e:
+                logger.debug(f"context.close failed: {e}")
 
     async def _fill_generic_form(self, page: Page, job: dict, cover_letter: str):
         """Attempt to fill any form fields on a generic page."""
@@ -469,7 +491,8 @@ class AutoApplicant:
                 if value:
                     await inp.fill(value)
                     await asyncio.sleep(0.2)
-            except Exception:
+            except Exception as e:
+                logger.debug(f"generic field fill skipped: {e}")
                 continue
 
         # Upload resume if file input exists
@@ -477,8 +500,8 @@ class AutoApplicant:
         if file_input and RESUME_PATH.exists():
             try:
                 await file_input.set_input_files(str(RESUME_PATH))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"generic resume upload failed: {e}")
 
 
 async def apply_to_single_job(job: dict, headless=True) -> ApplyResult:

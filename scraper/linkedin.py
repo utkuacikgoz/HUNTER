@@ -1,9 +1,9 @@
 """LinkedIn job scraper using public guest search + optional session cookie."""
 import logging
-import asyncio
 from urllib.parse import quote_plus
-from scraper.base import BaseScraper
+
 from config.settings import LINKEDIN_SESSION_COOKIE
+from scraper.base import BaseScraper
 
 logger = logging.getLogger(__name__)
 

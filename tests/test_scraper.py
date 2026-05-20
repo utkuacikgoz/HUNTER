@@ -1,5 +1,4 @@
 """Tests for scraper/base.py and scraper/linkedin.py."""
-import pytest
 from scraper.base import BaseScraper
 from scraper.linkedin import LinkedInScraper
 

@@ -1,6 +1,5 @@
 """Tests for telegram_bot/bot.py — escape, formatting, callback parsing, task tracking."""
-import pytest
-from telegram_bot.bot import _escape_md, format_job_message, truncate, _active_apply_tasks
+from telegram_bot.bot import _active_apply_tasks, _escape_md, format_job_message, truncate
 
 
 class TestEscapeMd:

@@ -1,10 +1,32 @@
 """Wellfound (AngelList) job scraper."""
 import logging
-import asyncio
 from urllib.parse import quote_plus
+
+from config.settings import WELLFOUND_SELECTORS
 from scraper.base import BaseScraper
 
 logger = logging.getLogger(__name__)
+
+
+async def _find_cards(page, selectors: list[str]):
+    """Try each selector in order; return cards from the first that matches.
+
+    Logs hit-counts for every selector so DOM drift is visible in the logs.
+    """
+    hits: list[tuple[str, int]] = []
+    chosen: list = []
+    for sel in selectors:
+        try:
+            found = await page.query_selector_all(sel)
+        except Exception as e:
+            logger.debug(f"wellfound selector {sel!r} errored: {e}")
+            found = []
+        hits.append((sel, len(found)))
+        if found and not chosen:
+            chosen = found
+    summary = ", ".join(f"{sel}={n}" for sel, n in hits)
+    logger.info(f"wellfound selectors: {summary}")
+    return chosen
 
 
 class WellfoundScraper(BaseScraper):
@@ -27,13 +49,7 @@ class WellfoundScraper(BaseScraper):
                     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     await self.delay()
 
-                cards = await page.query_selector_all(
-                    "div.styles_jobListing__aFBtk"
-                ) or await page.query_selector_all(
-                    "div[class*='jobListing']"
-                ) or await page.query_selector_all(
-                    "div.mb-6"
-                )
+                cards = await _find_cards(page, WELLFOUND_SELECTORS)
 
                 for card in cards[:max_results]:
                     try:

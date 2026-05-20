@@ -1,6 +1,7 @@
-import os
 import logging
+import os
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -26,11 +27,47 @@ MIN_SALARY = int(os.getenv("MIN_SALARY", "80000"))
 LOCATIONS = [loc.strip() for loc in os.getenv("LOCATIONS", "EMEA,Remote,US").split(",") if loc.strip()]
 MAX_JOBS_PER_DAY = int(os.getenv("MAX_JOBS_PER_DAY", "50"))
 
+
+def _csv_set(env_name: str, default: str) -> set[str]:
+    raw = os.getenv(env_name, default)
+    return {item.strip().lower() for item in raw.split(",") if item.strip()}
+
+
+# --- Region / sponsor filtering ---
+REGION_ALLOWLIST = _csv_set("REGION_ALLOWLIST", "us,eu,emea")
+REMOTE_REQUIRED = os.getenv("REMOTE_REQUIRED", "true").strip().lower() in {"1", "true", "yes", "y"}
+SPONSOR_FRIENDLY_COMPANIES = _csv_set(
+    "SPONSOR_FRIENDLY_COMPANIES",
+    "Stripe,GitLab,Automattic,Spotify,Klarna,Wise,Remote,Deel,Toptal,Doist,Buffer,Zapier,"
+    "Hotjar,Canonical,Elastic,HashiCorp,Sourcegraph,Vercel,Supabase,Linear,Notion,Figma,"
+    "Atlassian,Mozilla,Shopify,Discord,Cloudflare,DigitalOcean,n8n,Mattermost,GitHub,"
+    "MongoDB,Auth0,Postman,Snyk,Datadog,Miro,Loom,1Password,ClickUp",
+)
+SPONSOR_BLOCKLIST_COMPANIES = _csv_set("SPONSOR_BLOCKLIST_COMPANIES", "")
+ENABLE_LLM_SPONSOR_SCORING = os.getenv("ENABLE_LLM_SPONSOR_SCORING", "false").strip().lower() in {"1", "true", "yes", "y"}
+
+# --- Scraper health / selector overrides ---
+# Comma-separated Playwright selectors tried in order. Add new variants as Wellfound DOM drifts.
+WELLFOUND_SELECTORS = [
+    s.strip() for s in os.getenv(
+        "WELLFOUND_SELECTORS",
+        "div.styles_jobListing__aFBtk,div[class*='jobListing'],div.mb-6",
+    ).split(",") if s.strip()
+]
+# Skip a scraper if its last N runs all returned 0 jobs (0 disables the check).
+SCRAPER_SKIP_AFTER_ZEROS = int(os.getenv("SCRAPER_SKIP_AFTER_ZEROS", "3"))
+
+# --- Hiring velocity (DB-only) ---
+# Window over which we count distinct roles per company.
+VELOCITY_WINDOW_DAYS = int(os.getenv("VELOCITY_WINDOW_DAYS", "14"))
+# Companies with at least this many distinct roles in the window get the 🔥 badge.
+VELOCITY_HOT_THRESHOLD = int(os.getenv("VELOCITY_HOT_THRESHOLD", "3"))
+# When true, rank pending jobs from hot companies above the rest.
+VELOCITY_BOOST_RANK = os.getenv("VELOCITY_BOOST_RANK", "true").strip().lower() in {"1", "true", "yes", "y"}
+
 # --- Anti-detection ---
 SCRAPE_DELAY_MIN = float(os.getenv("SCRAPE_DELAY_MIN", "2.0"))
 SCRAPE_DELAY_MAX = float(os.getenv("SCRAPE_DELAY_MAX", "5.0"))
-APPLY_DELAY_MIN = float(os.getenv("APPLY_DELAY_MIN", "3.0"))
-APPLY_DELAY_MAX = float(os.getenv("APPLY_DELAY_MAX", "7.0"))
 PROXY_URL = os.getenv("PROXY_URL", "")
 
 USER_AGENTS = [
@@ -77,16 +114,14 @@ PLATFORM_URLS = {
     "remoteok": "https://remoteok.com/remote-product-manager-jobs",
 }
 
-# Resume text — loaded from file at runtime, NOT hardcoded in source
+# Resume text — loaded from file at runtime, NOT hardcoded in source.
+# The "missing resume" warning is emitted from validate_config(), not at import,
+# so it doesn't spam during tests or unrelated CLI commands.
 _resume_file = BASE_DIR / "config" / "resume.txt"
 if _resume_file.exists():
     RESUME_TEXT = _resume_file.read_text(encoding="utf-8")
 else:
     RESUME_TEXT = os.getenv("RESUME_TEXT", "")
-    if not RESUME_TEXT:
-        logging.getLogger(__name__).warning(
-            "No resume text found. Create config/resume.txt or set RESUME_TEXT env var."
-        )
 
 
 def validate_config(command: str) -> list[str]:

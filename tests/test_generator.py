@@ -1,8 +1,5 @@
 """Tests for prompts/generator.py — sanitization and fallback logic."""
-import os
-from unittest import mock
 
-import pytest
 
 
 class TestSanitizeExternalText:

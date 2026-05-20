@@ -6,44 +6,49 @@ import asyncio
 import logging
 import signal
 import sys
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
-from pathlib import Path
 
+from applicant.engine import apply_to_approved_jobs
 from config.settings import (
     BASE_DIR,
     DB_BACKUP_DIR,
     DB_PATH,
+    ENABLE_LLM_SPONSOR_SCORING,
+    FOLLOWUP_SCHEDULE_HOUR,
     HUNT_SCHEDULE_HOUR,
     HUNT_SCHEDULE_MINUTE,
-    FOLLOWUP_SCHEDULE_HOUR,
-    LOG_LEVEL,
-    SEARCH_QUERIES,
     LOCATIONS,
+    LOG_LEVEL,
     MAX_JOBS_PER_DAY,
+    SCRAPER_SKIP_AFTER_ZEROS,
+    SEARCH_QUERIES,
     TELEGRAM_BOT_TOKEN,
+    VELOCITY_BOOST_RANK,
+    VELOCITY_HOT_THRESHOLD,
+    VELOCITY_WINDOW_DAYS,
     validate_config,
 )
+from scraper.filters import evaluate_job_async
+from scraper.remoteok import RemoteOKScraper
+from scraper.wellfound import WellfoundScraper
+from telegram_bot.bot import (
+    _active_apply_tasks,
+    build_bot_app,
+    send_followup_reminders,
+    send_jobs_batch,
+    send_stats_message,
+)
 from tracker.database import (
+    get_approved_jobs,
+    get_company_velocity,
+    get_pending_jobs,
+    get_stats,
     init_db,
     insert_job,
-    get_pending_jobs,
-    get_approved_jobs,
-    get_stats,
-    log_action,
+    record_scraper_run,
+    should_skip_scraper,
 )
-from scraper.linkedin import LinkedInScraper
-from scraper.indeed import IndeedScraper
-from scraper.glassdoor import GlassdoorScraper
-from scraper.wellfound import WellfoundScraper
-from scraper.remoteok import RemoteOKScraper
-from telegram_bot.bot import (
-    send_jobs_batch,
-    send_followup_reminders,
-    send_stats_message,
-    build_bot_app,
-)
-from applicant.engine import apply_to_approved_jobs
 
 LOG_FILE = BASE_DIR / "hunter.log"
 
@@ -62,11 +67,8 @@ logging.basicConfig(
 logger = logging.getLogger("hunter")
 
 
-async def hunt():
-    """Scrape jobs from all platforms and send to Telegram."""
-    logger.info("🎯 Starting job hunt...")
-    all_jobs = []
-
+async def _scrape_all() -> list[dict]:
+    """Run every enabled scraper. Skips scrapers stuck on zero-yield streaks."""
     scrapers = [
         # LinkedInScraper(headless=True),  # Skipped - cookie issues
         # IndeedScraper(headless=True),  # Skipped
@@ -74,32 +76,52 @@ async def hunt():
         WellfoundScraper(headless=True),
         RemoteOKScraper(headless=True),
     ]
-
     per_platform = MAX_JOBS_PER_DAY // len(scrapers)
+    location = LOCATIONS[0] if LOCATIONS else ""
 
+    all_jobs: list[dict] = []
     for scraper in scrapers:
-        try:
-            async with scraper:
-                for query in SEARCH_QUERIES[:3]:  # Top 3 queries per platform
-                    for location in LOCATIONS[:2]:  # Top 2 locations
-                        jobs = await scraper.scrape(
-                            query=query,
-                            location=location,
-                            max_results=per_platform,
-                        )
-                        all_jobs.extend(jobs)
-
-                        if len(all_jobs) >= MAX_JOBS_PER_DAY:
-                            break
-                    if len(all_jobs) >= MAX_JOBS_PER_DAY:
-                        break
-        except Exception as e:
-            logger.error(f"Scraper {scraper.platform_name} failed: {e}")
+        platform = scraper.platform_name
+        if should_skip_scraper(platform, SCRAPER_SKIP_AFTER_ZEROS):
+            logger.warning(
+                f"Scraper {platform} skipped: last {SCRAPER_SKIP_AFTER_ZEROS} runs returned 0 jobs "
+                "(check selectors / site changes; clear scraper_health to re-enable)."
+            )
             continue
 
-    # Deduplicate and insert into DB (INSERT OR IGNORE handles dupes)
+        scraper_jobs: list[dict] = []
+        try:
+            async with scraper:
+                for query in SEARCH_QUERIES[:3]:
+                    # Scrapers currently ignore `location` but we still pass it.
+                    jobs = await scraper.scrape(
+                        query=query, location=location, max_results=per_platform,
+                    )
+                    scraper_jobs.extend(jobs)
+                    if len(all_jobs) + len(scraper_jobs) >= MAX_JOBS_PER_DAY * 2:
+                        break
+        except Exception as e:
+            logger.error(f"Scraper {platform} failed: {e}")
+        finally:
+            record_scraper_run(platform, len(scraper_jobs))
+            all_jobs.extend(scraper_jobs)
+
+    return all_jobs
+
+
+async def _classify_and_store(jobs: list[dict]) -> tuple[int, dict[str, int]]:
+    """Evaluate each scraped job, persist it, and return (new_count, verdict_counts)."""
+    llm_score = None
+    if ENABLE_LLM_SPONSOR_SCORING:
+        from prompts.generator import score_sponsor_signal
+        llm_score = score_sponsor_signal
+
+    counts = {"include": 0, "flag": 0, "drop": 0}
     new_count = 0
-    for job in all_jobs:
+    for job in jobs:
+        verdict = await evaluate_job_async(job, llm_score=llm_score)
+        counts[verdict.verdict] += 1
+
         job_id = insert_job(
             title=job["title"],
             company=job["company"],
@@ -108,20 +130,56 @@ async def hunt():
             url=job["url"],
             platform=job["platform"],
             description=job.get("description", ""),
+            region=verdict.region,
+            is_remote=verdict.is_remote,
+            sponsor_status=verdict.sponsor_status,
+            filter_verdict=verdict.verdict,
+            filter_reasons="; ".join(verdict.reasons)[:500] if verdict.reasons else None,
         )
         if job_id:
             new_count += 1
-
         if new_count >= MAX_JOBS_PER_DAY:
             break
+    return new_count, counts
 
-    logger.info(f"📊 Scraped {len(all_jobs)} total, {new_count} new jobs added")
 
-    # Send new pending jobs to Telegram
+def _rank_pending_by_velocity(velocity: dict[str, int]) -> list[dict]:
+    """Fetch pending jobs and stable-sort by velocity desc when enabled."""
     pending = get_pending_jobs(limit=MAX_JOBS_PER_DAY)
+    if VELOCITY_BOOST_RANK and velocity:
+        # Primary verdict order (include→flag) was set by get_pending_jobs;
+        # this stable sort only reshuffles within each group.
+        pending.sort(
+            key=lambda j: velocity.get((j.get("company") or "").strip().lower(), 0),
+            reverse=True,
+        )
+    return pending
+
+
+async def hunt():
+    """Scrape jobs from all platforms, filter, and send to Telegram."""
+    logger.info("🎯 Starting job hunt...")
+
+    all_jobs = await _scrape_all()
+    new_count, counts = await _classify_and_store(all_jobs)
+
+    velocity = get_company_velocity(days=VELOCITY_WINDOW_DAYS)
+    hot = sorted(
+        ((c, n) for c, n in velocity.items() if n >= VELOCITY_HOT_THRESHOLD),
+        key=lambda kv: kv[1],
+        reverse=True,
+    )[:5]
+    logger.info(
+        f"📊 Scraped {len(all_jobs)} total, {new_count} new jobs added "
+        f"(filter: {counts['include']} include / {counts['flag']} flag / {counts['drop']} drop) "
+        f"· hot companies (≥{VELOCITY_HOT_THRESHOLD} roles in {VELOCITY_WINDOW_DAYS}d): "
+        f"{hot or 'none'}"
+    )
+
+    pending = _rank_pending_by_velocity(velocity)
     if pending:
         logger.info(f"📱 Sending {len(pending)} jobs to Telegram...")
-        await send_jobs_batch(pending)
+        await send_jobs_batch(pending, velocity=velocity)
     else:
         logger.info("No new jobs to send")
 
@@ -230,6 +288,7 @@ async def bot():
 
     # --- Telegram command handlers ---
     from telegram.ext import CommandHandler
+
     from telegram_bot.bot import _is_authorized
 
     async def cmd_hunt(update, context):
@@ -303,10 +362,36 @@ async def bot():
         await shutdown_event.wait()
     finally:
         logger.info("Shutting down...")
+        # 1. Stop accepting new Telegram updates so no new apply tasks spawn.
+        try:
+            await app.updater.stop()
+        except Exception as e:
+            logger.warning(f"updater.stop failed: {e}")
+
+        # 2. Drain in-flight auto-apply tasks (bounded wait so SIGTERM still completes).
+        if _active_apply_tasks:
+            pending = list(_active_apply_tasks)
+            logger.info(f"Draining {len(pending)} in-flight apply task(s)...")
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True),
+                    timeout=60.0,
+                )
+            except TimeoutError:
+                logger.warning("Apply tasks did not finish in 60s; cancelling.")
+                for t in pending:
+                    t.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+
+        # 3. Stop the scheduler (waits for any running scheduled jobs).
         scheduler.shutdown(wait=True)
-        await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
+
+        # 4. Tear down the Telegram application.
+        try:
+            await app.stop()
+            await app.shutdown()
+        except Exception as e:
+            logger.warning(f"app shutdown failed: {e}")
         logger.info("Shutdown complete.")
 
 

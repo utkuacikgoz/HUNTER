@@ -1,28 +1,30 @@
 """Telegram bot for job review, approval, and notifications."""
-import logging
 import asyncio
+import logging
 import os
+
 import pytz
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot, InputFile
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.ext import (
     Application,
-    CommandHandler,
     CallbackQueryHandler,
+    CommandHandler,
     ContextTypes,
     Defaults,
 )
+
 from applicant.engine import apply_to_single_job
-from config.settings import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from config.settings import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, VELOCITY_HOT_THRESHOLD
 from tracker.database import (
-    get_pending_jobs,
-    get_approved_jobs,
     approve_job,
-    reject_job,
-    get_stats,
-    get_jobs_needing_followup,
-    record_followup,
     get_all_applied_jobs,
+    get_filter_precision,
     get_job_by_id,
+    get_jobs_needing_followup,
+    get_stats,
+    log_action,
+    record_followup,
+    reject_job,
     update_job_status,
 )
 
@@ -33,20 +35,65 @@ def truncate(text: str, max_len: int = 100) -> str:
     return text[:max_len] + "..." if len(text) > max_len else text
 
 
-def format_job_message(job: dict, index: int = 0) -> str:
+_VERDICT_BADGE = {
+    "include": "✅ Sponsor-friendly",
+    "flag": "🟡 Unclear sponsor — review",
+    "drop": "⛔ Disqualified",
+}
+_REGION_LABEL = {"us": "US", "eu": "EU", "emea": "EMEA", "other": "Other", "unknown": "?"}
+
+
+def format_job_message(
+    job: dict,
+    index: int = 0,
+    velocity: dict[str, int] | None = None,
+) -> str:
     salary_line = f"💰 {_escape_md(job['salary'])}\n" if job.get("salary") else ""
     escaped_url = _escape_md(job['url'])
     sep = '─' * 30
     idx = _escape_md(str(index))
+
+    verdict = job.get("filter_verdict")
+    region = _REGION_LABEL.get(job.get("region") or "", "?")
+    remote_tag = "Remote" if job.get("is_remote") else "On-site"
+    badge = _VERDICT_BADGE.get(verdict) if verdict else None
+    flag_line = f"{_escape_md(badge)}\n" if badge else ""
+    region_line = f"🌍 {_escape_md(f'{region} · {remote_tag}')}\n" if verdict else ""
+
+    velocity_line = ""
+    if velocity:
+        company_key = (job.get("company") or "").strip().lower()
+        n = velocity.get(company_key, 0)
+        if n >= VELOCITY_HOT_THRESHOLD:
+            velocity_line = f"{_escape_md(f'🔥 {n} open roles · hiring fast')}\n"
+
     return (
         f"{sep}\n"
+        f"{flag_line}"
+        f"{velocity_line}"
         f"🔹 *{idx}\\. {_escape_md(job['title'])}*\n"
         f"🏢 {_escape_md(job['company'])}\n"
         f"📍 {_escape_md(job['location'] or 'Not specified')}\n"
+        f"{region_line}"
         f"{salary_line}"
         f"🌐 {_escape_md(job['platform'].capitalize())}\n"
         f"🔗 [Apply Link]({escaped_url})\n"
     )
+
+
+def _record_filter_outcome(job: dict, decision: str) -> None:
+    """Persist the user's decision against the filter's verdict for precision tracking."""
+    verdict = job.get("filter_verdict") or "unknown"
+    sponsor = job.get("sponsor_status") or "unknown"
+    region = job.get("region") or "unknown"
+    try:
+        log_action(
+            job["id"],
+            "filter_outcome",
+            f"verdict={verdict};sponsor={sponsor};region={region};decision={decision}",
+        )
+    except Exception as e:
+        logger.debug(f"filter_outcome log failed for job {job.get('id')}: {e}")
 
 
 def _escape_md(text: str) -> str:
@@ -57,8 +104,15 @@ def _escape_md(text: str) -> str:
     return text
 
 
-async def send_jobs_batch(jobs: list[dict]) -> None:
-    """Send a batch of jobs to the Telegram channel for review."""
+async def send_jobs_batch(
+    jobs: list[dict],
+    velocity: dict[str, int] | None = None,
+) -> None:
+    """Send a batch of jobs to the Telegram channel for review.
+
+    `velocity` is an optional {company_lowercase: open_role_count} dict used to
+    surface 🔥 badges on companies that are hiring aggressively.
+    """
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logger.error("Telegram credentials not configured")
         return
@@ -93,7 +147,7 @@ async def send_jobs_batch(jobs: list[dict]) -> None:
                 ],
             ])
 
-            text = format_job_message(job, i)
+            text = format_job_message(job, i, velocity=velocity)
             await bot.send_message(
                 chat_id=TELEGRAM_CHAT_ID,
                 text=text,
@@ -204,17 +258,37 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _format_filter_precision(precision: dict[str, dict[str, int]]) -> str:
+    if not precision:
+        return "_no filter outcomes logged yet_"
+    order = ["include", "flag", "drop", "unknown"]
+    lines = []
+    for verdict in order:
+        bucket = precision.get(verdict)
+        if not bucket:
+            continue
+        approves = bucket.get("approve", 0)
+        rejects = bucket.get("reject", 0)
+        total = approves + rejects
+        rate = f"{approves * 100 // total}%" if total else "—"
+        lines.append(f"  {verdict}: {approves}/{total} approved ({rate})")
+    return "\n".join(lines) or "_no filter outcomes logged yet_"
+
+
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         return
     stats = get_stats()
+    precision = get_filter_precision()
     text = (
         f"📊 *HUNTER STATS*\n\n"
         f"Total: {stats['total']} | Pending: {stats['pending']}\n"
         f"Approved: {stats['approved']} | Applied: {stats['applied']}\n"
         f"Interviewing: {stats['interviewing']} | Offered: {stats['offered']}\n"
         f"Rejected: {stats['rejected']} | Closed: {stats['closed']}\n\n"
-        f"📅 This week: {stats['applied_this_week']} | This month: {stats['applied_this_month']}"
+        f"📅 This week: {stats['applied_this_week']} | This month: {stats['applied_this_month']}\n\n"
+        f"*Filter precision (approve-rate by verdict):*\n"
+        f"{_format_filter_precision(precision)}"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -302,6 +376,62 @@ async def _auto_apply(query, job_id: int, job: dict):
             logger.debug(f"Could not send screenshot for job {job_id}: {e}")
 
 
+async def _handle_approve(query, job: dict) -> None:
+    job_id = job["id"]
+    approve_job(job_id)
+    _record_filter_outcome(job, "approve")
+    title_esc = _escape_md(job["title"])
+    company_esc = _escape_md(job["company"])
+    dots = r"\.\.\."
+    await query.edit_message_text(
+        text=f"✅ *APPROVED* — applying{dots}\n{title_esc} @ {company_esc}",
+        parse_mode="MarkdownV2",
+    )
+    asyncio.create_task(_auto_apply(query, job_id, job))
+
+
+async def _handle_reject(query, job: dict) -> None:
+    reject_job(job["id"])
+    _record_filter_outcome(job, "reject")
+    await query.edit_message_text(
+        text=f"❌ *SKIPPED*\n{job['title']} @ {job['company']}",
+        parse_mode="Markdown",
+    )
+
+
+async def _handle_followedup(query, job: dict) -> None:
+    record_followup(job["id"])
+    await query.edit_message_text(
+        text=f"📧 *FOLLOWED UP*\n{job['title']} @ {job['company']}",
+        parse_mode="Markdown",
+    )
+
+
+async def _handle_interviewing(query, job: dict) -> None:
+    update_job_status(job["id"], "interviewing")
+    await query.edit_message_text(
+        text=f"🎤 *INTERVIEWING*\n{job['title']} @ {job['company']}",
+        parse_mode="Markdown",
+    )
+
+
+async def _handle_close(query, job: dict) -> None:
+    update_job_status(job["id"], "closed")
+    await query.edit_message_text(
+        text=f"🚪 *CLOSED*\n{job['title']} @ {job['company']}",
+        parse_mode="Markdown",
+    )
+
+
+_CALLBACK_HANDLERS = {
+    "approve": _handle_approve,
+    "reject": _handle_reject,
+    "followedup": _handle_followedup,
+    "interviewing": _handle_interviewing,
+    "close": _handle_close,
+}
+
+
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle inline keyboard button presses."""
     query = update.callback_query
@@ -314,12 +444,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
 
-    data = query.data
-    parts = data.split("_", 1)
+    parts = (query.data or "").split("_", 1)
     if len(parts) != 2:
         return
-
     action, job_id_str = parts
+
+    handler = _CALLBACK_HANDLERS.get(action)
+    if handler is None:
+        return
+
     try:
         job_id = int(job_id_str)
         if job_id <= 0 or job_id > 2**31 - 1:
@@ -332,41 +465,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_reply_markup(reply_markup=None)
         return
 
-    if action == "approve":
-        approve_job(job_id)
-        title_esc = _escape_md(job['title'])
-        company_esc = _escape_md(job['company'])
-        dots = r"\.\.\."
-        await query.edit_message_text(
-            text=f"\u2705 *APPROVED* \u2014 applying{dots}\n{title_esc} @ {company_esc}",
-            parse_mode="MarkdownV2",
-        )
-        # Auto-apply in background
-        asyncio.create_task(_auto_apply(query, job_id, job))
-    elif action == "reject":
-        reject_job(job_id)
-        await query.edit_message_text(
-            text=f"❌ *SKIPPED*\n{job['title']} @ {job['company']}",
-            parse_mode="Markdown",
-        )
-    elif action == "followedup":
-        record_followup(job_id)
-        await query.edit_message_text(
-            text=f"📧 *FOLLOWED UP*\n{job['title']} @ {job['company']}",
-            parse_mode="Markdown",
-        )
-    elif action == "interviewing":
-        update_job_status(job_id, "interviewing")
-        await query.edit_message_text(
-            text=f"🎤 *INTERVIEWING*\n{job['title']} @ {job['company']}",
-            parse_mode="Markdown",
-        )
-    elif action == "close":
-        update_job_status(job_id, "closed")
-        await query.edit_message_text(
-            text=f"🚪 *CLOSED*\n{job['title']} @ {job['company']}",
-            parse_mode="Markdown",
-        )
+    await handler(query, job)
 
 
 def build_bot_app() -> Application:
