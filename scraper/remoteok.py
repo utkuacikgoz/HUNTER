@@ -1,10 +1,12 @@
 """RemoteOK job scraper - uses their JSON API."""
 import logging
 import random
+
 import aiohttp
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from scraper.base import BaseScraper
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
 from config.settings import USER_AGENTS
+from scraper.base import BaseScraper
 
 logger = logging.getLogger(__name__)
 

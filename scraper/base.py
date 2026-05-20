@@ -3,12 +3,14 @@ import asyncio
 import logging
 import random
 from abc import ABC, abstractmethod
-from playwright.async_api import async_playwright, Browser, Page
 from urllib.parse import urlparse
+
+from playwright.async_api import Browser, Page, async_playwright
+
 from config.settings import (
     PROXY_URL,
-    SCRAPE_DELAY_MIN,
     SCRAPE_DELAY_MAX,
+    SCRAPE_DELAY_MIN,
     USER_AGENTS,
 )
 
@@ -45,9 +47,15 @@ class BaseScraper(ABC):
 
     async def __aexit__(self, *args):
         if self._browser:
-            await self._browser.close()
+            try:
+                await self._browser.close()
+            except Exception as e:
+                logger.warning(f"{self.platform_name}: browser.close failed: {e}")
         if self._playwright:
-            await self._playwright.stop()
+            try:
+                await self._playwright.stop()
+            except Exception as e:
+                logger.warning(f"{self.platform_name}: playwright.stop failed: {e}")
 
     async def new_page(self, cookies=None) -> tuple[Page, object]:
         ua = random.choice(USER_AGENTS)

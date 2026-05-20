@@ -1,5 +1,4 @@
 """Tests for config/settings.py and module imports."""
-import pytest
 from config.settings import validate_config
 
 

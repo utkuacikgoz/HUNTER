@@ -1,5 +1,6 @@
 import sqlite3
-from datetime import datetime, timedelta, UTC
+from datetime import UTC, datetime, timedelta
+
 from config.settings import DB_PATH, FOLLOWUP_DAYS
 
 
@@ -9,6 +10,22 @@ def get_connection():
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
+
+
+_FILTER_COLUMNS = (
+    ("region", "TEXT"),
+    ("is_remote", "INTEGER"),
+    ("sponsor_status", "TEXT"),
+    ("filter_verdict", "TEXT"),
+    ("filter_reasons", "TEXT"),
+)
+
+
+def _add_missing_columns(conn):
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    for name, sql_type in _FILTER_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {sql_type}")
 
 
 def init_db():
@@ -43,23 +60,110 @@ def init_db():
             FOREIGN KEY (job_id) REFERENCES jobs(id)
         );
 
+        CREATE TABLE IF NOT EXISTS scraper_health (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            platform TEXT NOT NULL,
+            jobs_found INTEGER NOT NULL,
+            ran_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
         CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
         CREATE INDEX IF NOT EXISTS idx_jobs_platform ON jobs(platform);
         CREATE INDEX IF NOT EXISTS idx_jobs_scraped_at ON jobs(scraped_at);
         CREATE INDEX IF NOT EXISTS idx_application_log_job_id ON application_log(job_id);
+        CREATE INDEX IF NOT EXISTS idx_scraper_health_platform_ran ON scraper_health(platform, ran_at);
     """)
+    _add_missing_columns(conn)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_filter_verdict ON jobs(filter_verdict)")
     conn.commit()
     conn.close()
 
 
-def insert_job(title, company, location, salary, url, platform, description=""):
+def record_scraper_run(platform: str, jobs_found: int) -> None:
+    """Persist the result of a scraper run for health/skip decisions."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO scraper_health (platform, jobs_found) VALUES (?, ?)",
+            (platform, jobs_found),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_company_velocity(days: int = 14) -> dict[str, int]:
+    """Return {company_lowercase: distinct_role_count} over the last `days` days.
+
+    Roles are deduped by URL (the unique key for a posting). The lookup is keyed
+    lowercase so callers can match against any-case company strings.
+    """
+    if days <= 0:
+        return {}
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """SELECT LOWER(TRIM(company)) AS c, COUNT(DISTINCT url) AS n
+               FROM jobs
+               WHERE TRIM(company) != ''
+                 AND scraped_at >= datetime('now', ?)
+               GROUP BY LOWER(TRIM(company))""",
+            (f"-{int(days)} days",),
+        ).fetchall()
+    finally:
+        conn.close()
+    return {row["c"]: row["n"] for row in rows}
+
+
+def should_skip_scraper(platform: str, threshold: int) -> bool:
+    """True iff the last `threshold` runs of this platform all returned 0 jobs.
+
+    A threshold of 0 disables the check entirely.
+    """
+    if threshold <= 0:
+        return False
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT jobs_found FROM scraper_health WHERE platform = ? ORDER BY ran_at DESC LIMIT ?",
+            (platform, threshold),
+        ).fetchall()
+    finally:
+        conn.close()
+    if len(rows) < threshold:
+        return False
+    return all(row["jobs_found"] == 0 for row in rows)
+
+
+def insert_job(
+    title,
+    company,
+    location,
+    salary,
+    url,
+    platform,
+    description="",
+    *,
+    region: str | None = None,
+    is_remote: bool | None = None,
+    sponsor_status: str | None = None,
+    filter_verdict: str | None = None,
+    filter_reasons: str | None = None,
+):
     conn = get_connection()
     try:
         description = (description or "")[:5000]
         conn.execute(
-            """INSERT OR IGNORE INTO jobs (title, company, location, salary, url, platform, description)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (title, company, location, salary, url, platform, description),
+            """INSERT OR IGNORE INTO jobs
+               (title, company, location, salary, url, platform, description,
+                region, is_remote, sponsor_status, filter_verdict, filter_reasons)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                title, company, location, salary, url, platform, description,
+                region,
+                int(is_remote) if is_remote is not None else None,
+                sponsor_status, filter_verdict, filter_reasons,
+            ),
         )
         was_inserted = conn.execute("SELECT changes()").fetchone()[0] > 0
         if not was_inserted:
@@ -94,7 +198,17 @@ def get_pending_jobs(limit=50):
     conn = get_connection()
     try:
         rows = conn.execute(
-            "SELECT * FROM jobs WHERE status = 'pending' ORDER BY scraped_at DESC LIMIT ?",
+            """SELECT * FROM jobs
+               WHERE status = 'pending'
+                 AND (filter_verdict IS NULL OR filter_verdict != 'drop')
+               ORDER BY
+                 CASE filter_verdict
+                   WHEN 'include' THEN 0
+                   WHEN 'flag' THEN 1
+                   ELSE 2
+                 END,
+                 scraped_at DESC
+               LIMIT ?""",
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -213,6 +327,39 @@ def get_stats():
         return stats
     finally:
         conn.close()
+
+
+def get_filter_precision() -> dict[str, dict[str, int]]:
+    """Return approve/reject counts grouped by the job's filter_verdict.
+
+    Counts only come from logged user decisions (`filter_outcome` rows in application_log),
+    so legacy jobs that pre-date the filter aren't counted in either direction.
+    Shape: {"include": {"approve": 12, "reject": 3}, "flag": {...}, ...}
+    """
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """SELECT j.filter_verdict AS verdict, l.detail AS detail
+               FROM application_log l
+               JOIN jobs j ON j.id = l.job_id
+               WHERE l.action = 'filter_outcome'"""
+        ).fetchall()
+    finally:
+        conn.close()
+
+    out: dict[str, dict[str, int]] = {}
+    for row in rows:
+        verdict = row["verdict"] or "unknown"
+        # detail format: "verdict=X;sponsor=Y;region=Z;decision=W"
+        decision = "unknown"
+        for kv in (row["detail"] or "").split(";"):
+            if kv.startswith("decision="):
+                decision = kv.split("=", 1)[1]
+                break
+        bucket = out.setdefault(verdict, {"approve": 0, "reject": 0})
+        if decision in bucket:
+            bucket[decision] += 1
+    return out
 
 
 def get_job_by_id(job_id):

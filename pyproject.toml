@@ -1,0 +1,20 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers"
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "E501",  # line-too-long — handled by formatter where it matters
+    "B008",  # function calls in default args (fine for FastAPI / pytest patterns)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]  # module-level DB patching in test_database.py is intentional

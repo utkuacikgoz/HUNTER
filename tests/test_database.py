@@ -1,8 +1,7 @@
 """Tests for tracker/database.py — CRUD, status transitions, followup logic, stats."""
 import os
-import sqlite3
 import tempfile
-from datetime import datetime, timedelta, UTC
+from datetime import UTC, datetime, timedelta
 from unittest import mock
 
 import pytest
@@ -13,28 +12,31 @@ _tmp.close()
 
 with mock.patch.dict(os.environ, {"DB_PATH": _tmp.name}):
     # Force settings to reload with test DB path
-    import importlib
     import config.settings as settings
     settings.DB_PATH = type(settings.DB_PATH)(_tmp.name)
 
     from tracker.database import (
-        init_db,
-        insert_job,
-        get_pending_jobs,
-        get_approved_jobs,
-        update_job_status,
         approve_job,
-        reject_job,
-        mark_applied,
-        get_stats,
+        get_all_applied_jobs,
+        get_approved_jobs,
+        get_company_velocity,
+        get_connection,
+        get_filter_precision,
         get_job_by_id,
         get_jobs_needing_followup,
-        record_followup,
-        set_cover_letter,
+        get_pending_jobs,
+        get_stats,
+        init_db,
+        insert_job,
         job_url_exists,
-        get_all_applied_jobs,
         log_action,
-        get_connection,
+        mark_applied,
+        record_followup,
+        record_scraper_run,
+        reject_job,
+        set_cover_letter,
+        should_skip_scraper,
+        update_job_status,
     )
 
 # Initialize test DB
@@ -47,6 +49,7 @@ def fresh_db():
     conn = get_connection()
     conn.execute("DELETE FROM application_log")
     conn.execute("DELETE FROM jobs")
+    conn.execute("DELETE FROM scraper_health")
     conn.commit()
     conn.close()
     yield
@@ -300,6 +303,91 @@ class TestLogAction:
         # After commit, changes should be visible
         job = get_job_by_id(job_id)
         assert job["status"] == "approved"
+
+
+class TestFilterPrecision:
+    """Verify get_filter_precision groups approve/reject by the filter verdict."""
+
+    def _seed_classified(self, url: str, verdict: str) -> int:
+        return insert_job(
+            "PM", "Acme", "Remote", "", url, "wellfound", "",
+            region="eu", is_remote=True, sponsor_status="allowlist",
+            filter_verdict=verdict, filter_reasons="seeded",
+        )
+
+    def test_empty(self):
+        assert get_filter_precision() == {}
+
+    def test_counts_approves_and_rejects_per_verdict(self):
+        a = self._seed_classified("https://example.com/p1", "include")
+        b = self._seed_classified("https://example.com/p2", "include")
+        c = self._seed_classified("https://example.com/p3", "flag")
+        log_action(a, "filter_outcome", "verdict=include;sponsor=allowlist;region=eu;decision=approve")
+        log_action(b, "filter_outcome", "verdict=include;sponsor=allowlist;region=eu;decision=reject")
+        log_action(c, "filter_outcome", "verdict=flag;sponsor=unknown;region=eu;decision=approve")
+
+        p = get_filter_precision()
+        assert p["include"] == {"approve": 1, "reject": 1}
+        assert p["flag"] == {"approve": 1, "reject": 0}
+
+    def test_ignores_non_filter_actions(self):
+        a = self._seed_classified("https://example.com/p4", "include")
+        log_action(a, "scraped", "ignored")
+        log_action(a, "filter_outcome", "verdict=include;sponsor=allowlist;region=eu;decision=approve")
+        p = get_filter_precision()
+        assert p["include"] == {"approve": 1, "reject": 0}
+
+
+class TestCompanyVelocity:
+    """get_company_velocity groups jobs in the window by lowercased company."""
+
+    def test_empty_db(self):
+        assert get_company_velocity() == {}
+
+    def test_counts_distinct_urls_per_company_case_insensitive(self):
+        insert_job("PM A", "Stripe",  "Remote", "", "https://example.com/v1", "wellfound")
+        insert_job("PM B", "STRIPE",  "Remote", "", "https://example.com/v2", "wellfound")
+        insert_job("PM C", "stripe",  "Remote", "", "https://example.com/v3", "remoteok")
+        insert_job("PM D", "FooCorp", "Remote", "", "https://example.com/v4", "wellfound")
+        v = get_company_velocity()
+        assert v == {"stripe": 3, "foocorp": 1}
+
+    def test_outside_window_excluded(self):
+        a = insert_job("PM", "Stripe", "Remote", "", "https://example.com/v5", "wellfound")
+        conn = get_connection()
+        old = (datetime.now(UTC) - timedelta(days=60)).isoformat()
+        conn.execute("UPDATE jobs SET scraped_at = ? WHERE id = ?", (old, a))
+        conn.commit()
+        conn.close()
+        assert get_company_velocity(days=14) == {}
+        assert get_company_velocity(days=90) == {"stripe": 1}
+
+    def test_zero_days_returns_empty(self):
+        insert_job("PM", "Stripe", "Remote", "", "https://example.com/v6", "wellfound")
+        assert get_company_velocity(days=0) == {}
+
+
+class TestScraperHealth:
+    """should_skip_scraper triggers only after N consecutive zero runs."""
+
+    def test_no_history_does_not_skip(self):
+        assert should_skip_scraper("wellfound", threshold=3) is False
+
+    def test_three_zero_runs_skip(self):
+        for _ in range(3):
+            record_scraper_run("wellfound", 0)
+        assert should_skip_scraper("wellfound", threshold=3) is True
+
+    def test_recent_nonzero_resets(self):
+        record_scraper_run("wellfound", 0)
+        record_scraper_run("wellfound", 0)
+        record_scraper_run("wellfound", 5)
+        assert should_skip_scraper("wellfound", threshold=3) is False
+
+    def test_threshold_zero_disables(self):
+        for _ in range(10):
+            record_scraper_run("wellfound", 0)
+        assert should_skip_scraper("wellfound", threshold=0) is False
 
 
 class TestDuplicateApplyGuard:
