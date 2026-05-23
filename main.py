@@ -21,6 +21,7 @@ from config.settings import (
     LOCATIONS,
     LOG_LEVEL,
     MAX_JOBS_PER_DAY,
+    MAX_QUERIES_PER_RUN,
     SCRAPER_SKIP_AFTER_ZEROS,
     SEARCH_QUERIES,
     TELEGRAM_BOT_TOKEN,
@@ -38,6 +39,7 @@ from telegram_bot.bot import (
     send_followup_reminders,
     send_jobs_batch,
     send_stats_message,
+    shutdown_apply_worker,
 )
 from tracker.database import (
     get_approved_jobs,
@@ -78,6 +80,7 @@ async def _scrape_all() -> list[dict]:
     ]
     per_platform = MAX_JOBS_PER_DAY // len(scrapers)
     location = LOCATIONS[0] if LOCATIONS else ""
+    queries = SEARCH_QUERIES if MAX_QUERIES_PER_RUN <= 0 else SEARCH_QUERIES[:MAX_QUERIES_PER_RUN]
 
     all_jobs: list[dict] = []
     for scraper in scrapers:
@@ -92,7 +95,7 @@ async def _scrape_all() -> list[dict]:
         scraper_jobs: list[dict] = []
         try:
             async with scraper:
-                for query in SEARCH_QUERIES[:3]:
+                for query in queries:
                     # Scrapers currently ignore `location` but we still pass it.
                     jobs = await scraper.scrape(
                         query=query, location=location, max_results=per_platform,
@@ -267,6 +270,13 @@ async def bot():
         except Exception as e:
             logger.error(f"Scheduled backup failed: {e}")
 
+    async def scheduled_screenshot_prune():
+        logger.info("Scheduled screenshot prune triggered")
+        try:
+            prune_screenshots(max_age_days=30)
+        except Exception as e:
+            logger.error(f"Scheduled screenshot prune failed: {e}")
+
     scheduler.add_job(
         scheduled_hunt,
         CronTrigger(hour=HUNT_SCHEDULE_HOUR, minute=HUNT_SCHEDULE_MINUTE),
@@ -283,6 +293,12 @@ async def bot():
         scheduled_backup,
         CronTrigger(hour=3, minute=0),
         id="daily_backup",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        scheduled_screenshot_prune,
+        CronTrigger(hour=3, minute=30),
+        id="daily_screenshot_prune",
         replace_existing=True,
     )
 
@@ -368,17 +384,18 @@ async def bot():
         except Exception as e:
             logger.warning(f"updater.stop failed: {e}")
 
-        # 2. Drain in-flight auto-apply tasks (bounded wait so SIGTERM still completes).
+        # 2. Drain the apply queue + in-flight apply, then stop the worker.
+        await shutdown_apply_worker(timeout=60.0)
         if _active_apply_tasks:
             pending = list(_active_apply_tasks)
-            logger.info(f"Draining {len(pending)} in-flight apply task(s)...")
+            logger.info(f"Awaiting {len(pending)} in-flight apply task(s)...")
             try:
                 await asyncio.wait_for(
                     asyncio.gather(*pending, return_exceptions=True),
-                    timeout=60.0,
+                    timeout=30.0,
                 )
             except TimeoutError:
-                logger.warning("Apply tasks did not finish in 60s; cancelling.")
+                logger.warning("Apply tasks did not finish; cancelling.")
                 for t in pending:
                     t.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
@@ -419,6 +436,21 @@ def backup_database():
         if f.stat().st_mtime < cutoff:
             f.unlink()
             logger.info(f"Pruned old backup: {f.name}")
+
+
+def prune_screenshots(max_age_days: int = 30):
+    """Delete apply screenshots older than `max_age_days` to bound disk growth."""
+    from applicant.engine import SCREENSHOTS_DIR
+    if not SCREENSHOTS_DIR.exists():
+        return
+    cutoff = datetime.now(UTC).timestamp() - (max_age_days * 86400)
+    removed = 0
+    for f in SCREENSHOTS_DIR.glob("*.png"):
+        if f.stat().st_mtime < cutoff:
+            f.unlink()
+            removed += 1
+    if removed:
+        logger.info(f"Pruned {removed} screenshot(s) older than {max_age_days}d")
 
 
 def main():

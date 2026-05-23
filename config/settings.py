@@ -26,6 +26,8 @@ TARGET_ROLE = os.getenv("TARGET_ROLE", "Senior Product Manager")
 MIN_SALARY = int(os.getenv("MIN_SALARY", "80000"))
 LOCATIONS = [loc.strip() for loc in os.getenv("LOCATIONS", "EMEA,Remote,US").split(",") if loc.strip()]
 MAX_JOBS_PER_DAY = int(os.getenv("MAX_JOBS_PER_DAY", "50"))
+# How many of SEARCH_QUERIES to run per scrape (0 = all). Previously hardcoded to 3.
+MAX_QUERIES_PER_RUN = int(os.getenv("MAX_QUERIES_PER_RUN", "0"))
 
 
 def _csv_set(env_name: str, default: str) -> set[str]:

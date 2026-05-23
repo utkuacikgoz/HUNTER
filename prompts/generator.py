@@ -21,12 +21,22 @@ def _get_client():
 
 
 def _sanitize_external_text(text: str, max_len: int = 2000) -> str:
-    """Sanitize untrusted text before including in LLM prompts."""
+    """Sanitize untrusted text before including in LLM prompts.
+
+    Defense-in-depth against prompt injection is the system prompt ("treat as
+    literal data") plus the <<< >>> delimiters around this text. Here we only
+    bound length and strip control characters — we deliberately do NOT do naive
+    keyword filtering (e.g. blanking "INSTRUCTIONS"), which gives false confidence,
+    is trivially bypassed by casing/spacing, and mangles legitimate job text.
+    """
     if not text:
         return "Not available"
-    # Truncate, strip control chars, remove potential prompt injection markers
     sanitized = text[:max_len]
-    sanitized = sanitized.replace("INSTRUCTIONS", "[FILTERED]").replace("IGNORE", "[FILTERED]")
+    # Strip ASCII control chars except tab/newline/carriage-return.
+    sanitized = "".join(
+        ch for ch in sanitized
+        if ch in "\t\n\r" or (ord(ch) >= 32 and ord(ch) != 127)
+    )
     return sanitized
 
 

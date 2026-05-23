@@ -24,6 +24,12 @@ logger = logging.getLogger(__name__)
 SCREENSHOTS_DIR = Path(__file__).resolve().parent.parent / "screenshots"
 SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Tunables (previously magic numbers scattered through the apply methods).
+PAGE_TIMEOUT_MS = 20000          # page.goto navigation timeout
+PAGE_SETTLE_S = 2                # pause after navigation / clicks for JS to render
+STEP_PAUSE_S = 1.5               # pause between LinkedIn Easy Apply steps
+MAX_FORM_STEPS = 10              # max LinkedIn multi-step form pages to traverse
+
 
 class AutoApplicant:
     """Automated job application engine using Playwright."""
@@ -53,7 +59,7 @@ class AutoApplicant:
             except Exception as e:
                 logger.warning(f"AutoApplicant: playwright.stop failed: {e}")
 
-    async def apply_to_job(self, job: dict) -> bool:
+    async def apply_to_job(self, job: dict) -> ApplyResult:
         """Apply to a single job. Routes to platform-specific handler."""
         platform = job.get("platform", "")
         job_id = job["id"]
@@ -62,7 +68,10 @@ class AutoApplicant:
         fresh = get_job_by_id(job_id)
         if fresh and fresh.get("status") == "applied":
             logger.info(f"Already applied to job {job_id}, skipping")
-            return True
+            return ApplyResult(
+                success=True, method="already_applied",
+                message="Already applied; skipped.",
+            )
 
         logger.info(f"Applying to: {job['title']} at {job['company']} ({platform})")
 
@@ -110,7 +119,7 @@ class AutoApplicant:
             await context.add_cookies(cookies)
         return context
 
-    async def _apply_linkedin(self, job: dict, cover_letter: str) -> bool:
+    async def _apply_linkedin(self, job: dict, cover_letter: str) -> ApplyResult:
         """Apply via LinkedIn Easy Apply."""
         cookies = []
         if LINKEDIN_SESSION_COOKIE:
@@ -125,8 +134,8 @@ class AutoApplicant:
         page = await context.new_page()
 
         try:
-            await page.goto(job["url"], wait_until="domcontentloaded", timeout=20000)
-            await asyncio.sleep(2)
+            await page.goto(job["url"], wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+            await asyncio.sleep(PAGE_SETTLE_S)
 
             # Look for Easy Apply button
             easy_apply = await page.query_selector(
@@ -147,10 +156,10 @@ class AutoApplicant:
                 )
 
             await easy_apply.click()
-            await asyncio.sleep(2)
+            await asyncio.sleep(PAGE_SETTLE_S)
 
             # Process multi-step form
-            for _step in range(10):  # Max 10 steps
+            for _step in range(MAX_FORM_STEPS):
                 # Fill in any visible form fields
                 await self._fill_linkedin_fields(page, cover_letter)
 
@@ -162,7 +171,7 @@ class AutoApplicant:
                 )
                 if submit:
                     await submit.click()
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(PAGE_SETTLE_S)
                     # Check for success
                     success_el = await page.query_selector(
                         "h2:has-text('application was sent'), "
@@ -185,7 +194,7 @@ class AutoApplicant:
                 )
                 if next_btn:
                     await next_btn.click()
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(STEP_PAUSE_S)
                 else:
                     break
 
@@ -319,8 +328,8 @@ class AutoApplicant:
         page = await context.new_page()
 
         try:
-            await page.goto(job["url"], wait_until="domcontentloaded", timeout=20000)
-            await asyncio.sleep(2)
+            await page.goto(job["url"], wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+            await asyncio.sleep(PAGE_SETTLE_S)
 
             apply_btn = await page.query_selector(
                 "button[id*='applyButton'], "
@@ -338,13 +347,13 @@ class AutoApplicant:
                 if href or "company site" in btn_text:
                     # External application - can't auto-apply
                     if href:
-                        await page.goto(href, wait_until="domcontentloaded", timeout=20000)
-                        await asyncio.sleep(2)
+                        await page.goto(href, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+                        await asyncio.sleep(PAGE_SETTLE_S)
                     method = "external_redirect"
                     message = "Redirected to external site. Needs manual application."
                 else:
                     await apply_btn.click()
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(PAGE_SETTLE_S)
                     # Fill any visible forms
                     await self._fill_generic_form(page, job, cover_letter)
                     method = "form_filled"
@@ -353,7 +362,9 @@ class AutoApplicant:
             ss_path = str(SCREENSHOTS_DIR / f"indeed_{job['id']}.png")
             await page.screenshot(path=ss_path)
 
-            actually_applied = method == "form_filled"
+            # form_filled means we filled inputs but never confirmed a submission,
+            # so we do NOT report success — it surfaces as "needs manual" instead.
+            actually_applied = False
             return ApplyResult(
                 success=actually_applied, method=method,
                 screenshot_path=ss_path, message=message,
@@ -378,8 +389,8 @@ class AutoApplicant:
         page = await context.new_page()
 
         try:
-            await page.goto(job["url"], wait_until="domcontentloaded", timeout=20000)
-            await asyncio.sleep(2)
+            await page.goto(job["url"], wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+            await asyncio.sleep(PAGE_SETTLE_S)
 
             apply_btn = await page.query_selector(
                 "button:has-text('Apply'), "
@@ -391,7 +402,7 @@ class AutoApplicant:
 
             if apply_btn:
                 await apply_btn.click()
-                await asyncio.sleep(2)
+                await asyncio.sleep(PAGE_SETTLE_S)
                 await self._fill_generic_form(page, job, cover_letter)
                 method = "form_filled"
                 message = "Apply button clicked and form filled (unconfirmed)."
@@ -399,7 +410,9 @@ class AutoApplicant:
             ss_path = str(SCREENSHOTS_DIR / f"wellfound_{job['id']}.png")
             await page.screenshot(path=ss_path)
 
-            actually_applied = method == "form_filled"
+            # form_filled means we filled inputs but never confirmed a submission,
+            # so we do NOT report success — it surfaces as "needs manual" instead.
+            actually_applied = False
             return ApplyResult(
                 success=actually_applied, method=method,
                 screenshot_path=ss_path, message=message,
@@ -424,8 +437,8 @@ class AutoApplicant:
         page = await context.new_page()
 
         try:
-            await page.goto(job["url"], wait_until="domcontentloaded", timeout=20000)
-            await asyncio.sleep(2)
+            await page.goto(job["url"], wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+            await asyncio.sleep(PAGE_SETTLE_S)
 
             # Try clicking any "Apply" button
             apply_btn = await page.query_selector(
@@ -440,7 +453,7 @@ class AutoApplicant:
 
             if apply_btn:
                 await apply_btn.click()
-                await asyncio.sleep(2)
+                await asyncio.sleep(PAGE_SETTLE_S)
                 await self._fill_generic_form(page, job, cover_letter)
                 method = "form_filled"
                 message = "Apply button clicked and form filled (unconfirmed)."
