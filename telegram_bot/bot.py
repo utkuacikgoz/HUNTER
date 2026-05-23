@@ -325,16 +325,56 @@ async def cmd_followups(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 _active_apply_tasks: set = set()
 
+# Single-worker apply queue: every "Apply Now" tap is enqueued and processed
+# one at a time, so we never run more than one browser concurrently.
+_apply_queue: "asyncio.Queue" = asyncio.Queue()
+_apply_worker_task: "asyncio.Task | None" = None
+
+
+def _ensure_apply_worker() -> None:
+    """Start the apply worker lazily (first enqueue), or restart if it died."""
+    global _apply_worker_task
+    if _apply_worker_task is None or _apply_worker_task.done():
+        _apply_worker_task = asyncio.create_task(_apply_worker())
+
+
+async def _apply_worker() -> None:
+    while True:
+        query, job_id, job = await _apply_queue.get()
+        try:
+            await _auto_apply(query, job_id, job)
+        except Exception as e:
+            logger.error(f"apply worker error for job {job_id}: {e}")
+        finally:
+            _apply_queue.task_done()
+
+
+async def shutdown_apply_worker(timeout: float = 60.0) -> None:
+    """Drain queued applies, then stop the worker. Called from main.bot() shutdown."""
+    if _apply_queue.qsize() or _active_apply_tasks:
+        logger.info(f"Draining apply queue ({_apply_queue.qsize()} queued)...")
+        try:
+            await asyncio.wait_for(_apply_queue.join(), timeout=timeout)
+        except TimeoutError:
+            logger.warning("Apply queue did not drain within timeout.")
+    global _apply_worker_task
+    if _apply_worker_task and not _apply_worker_task.done():
+        _apply_worker_task.cancel()
+        try:
+            await _apply_worker_task
+        except asyncio.CancelledError:
+            pass
+
 
 async def _auto_apply(query, job_id: int, job: dict):
-    """Background task: apply to a single job after approval."""
+    """Apply to a single job (runs inside the serial apply worker)."""
     task = asyncio.current_task()
     _active_apply_tasks.add(task)
     try:
         result = await apply_to_single_job(job, headless=True)
         method_label = {
             "easy_apply": "Easy Apply \u2705",
-            "form_filled": "Form Filled \u2705",
+            "form_filled": "Form Filled \u2014 unconfirmed, verify manually",
             "screenshot_only": "Screenshot Only \u2014 needs manual apply",
             "external_redirect": "External Site \u2014 needs manual apply",
             "error": "Error",
@@ -342,7 +382,7 @@ async def _auto_apply(query, job_id: int, job: dict):
 
         if result.success:
             text = f"\u2705 *APPLIED* ({method_label})\n{job['title']} @ {job['company']}\n_{result.message}_"
-        elif result.method in ("screenshot_only", "external_redirect"):
+        elif result.method in ("screenshot_only", "external_redirect", "form_filled"):
             text = (
                 f"\u26a0\ufe0f *NEEDS MANUAL APPLY* ({method_label})\n"
                 f"{job['title']} @ {job['company']}\n"
@@ -377,17 +417,41 @@ async def _auto_apply(query, job_id: int, job: dict):
 
 
 async def _handle_approve(query, job: dict) -> None:
+    """Mark approved and surface the URL. Does NOT auto-apply — the user reviews
+    the destination URL first, then explicitly taps Apply Now (or sends /apply)."""
     job_id = job["id"]
     approve_job(job_id)
     _record_filter_outcome(job, "approve")
-    title_esc = _escape_md(job["title"])
-    company_esc = _escape_md(job["company"])
-    dots = r"\.\.\."
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚀 Apply Now", callback_data=f"applynow_{job_id}")],
+        [InlineKeyboardButton("🔗 View Job", url=job["url"])],
+    ])
+    # Plain text (no parse_mode) so the raw URL is fully visible and unescaped.
     await query.edit_message_text(
-        text=f"✅ *APPROVED* — applying{dots}\n{title_esc} @ {company_esc}",
-        parse_mode="MarkdownV2",
+        text=(
+            f"✅ APPROVED\n{job['title']} @ {job['company']}\n"
+            f"🔗 {job['url']}\n\n"
+            f"Review the destination URL above, then tap 🚀 Apply Now "
+            f"(or send /apply to apply to all approved jobs)."
+        ),
+        reply_markup=keyboard,
+        disable_web_page_preview=True,
     )
-    asyncio.create_task(_auto_apply(query, job_id, job))
+
+
+async def _handle_applynow(query, job: dict) -> None:
+    """Enqueue an approved job for the serial apply worker."""
+    job_id = job["id"]
+    _ensure_apply_worker()
+    await _apply_queue.put((query, job_id, job))
+    position = _apply_queue.qsize()
+    await query.edit_message_text(
+        text=(
+            f"⏳ QUEUED FOR APPLY (position {position})\n"
+            f"{job['title']} @ {job['company']}"
+        ),
+        disable_web_page_preview=True,
+    )
 
 
 async def _handle_reject(query, job: dict) -> None:
@@ -425,6 +489,7 @@ async def _handle_close(query, job: dict) -> None:
 
 _CALLBACK_HANDLERS = {
     "approve": _handle_approve,
+    "applynow": _handle_applynow,
     "reject": _handle_reject,
     "followedup": _handle_followedup,
     "interviewing": _handle_interviewing,
@@ -435,6 +500,8 @@ _CALLBACK_HANDLERS = {
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle inline keyboard button presses."""
     query = update.callback_query
+    if query is None or query.message is None:
+        return
 
     # Auth check FIRST: only allow the configured chat to interact
     if str(query.message.chat_id) != str(TELEGRAM_CHAT_ID):
