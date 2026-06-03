@@ -41,7 +41,7 @@ class RemoteOKScraper(BaseScraper):
                     return None
 
     async def scrape(self, query: str, location: str = "", max_results: int = 10) -> list[dict]:
-        jobs = []
+        jobs: list[dict] = []
         try:
             tag = query.lower().replace(" ", "-")
             api_url = f"https://remoteok.com/api?tag={tag}"

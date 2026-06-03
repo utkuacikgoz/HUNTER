@@ -110,8 +110,6 @@ SEARCH_QUERIES = [
 # Platform URLs
 PLATFORM_URLS = {
     "linkedin": "https://www.linkedin.com/jobs/search/",
-    "indeed": "https://www.indeed.com/jobs",
-    "glassdoor": "https://www.glassdoor.com/Job/jobs.htm",
     "wellfound": "https://wellfound.com/jobs",
     "remoteok": "https://remoteok.com/remote-product-manager-jobs",
 }

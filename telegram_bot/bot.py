@@ -366,34 +366,54 @@ async def shutdown_apply_worker(timeout: float = 60.0) -> None:
             pass
 
 
+def _format_apply_result(result, job: dict) -> str:
+    """Build the Telegram status message for a finished apply attempt.
+
+    Distinguishes ``form_filled`` \u2014 where the bot already pre-filled the
+    candidate's details and cover letter, so the user only has to review and
+    submit \u2014 from cases where nothing was filled (no form / external site).
+    Always surfaces the job URL so the next step is one tap away, instead of a
+    blanket "NEEDS MANUAL APPLY" that makes a useful pre-fill look like a failure.
+    """
+    header = f"{job.get('title', '')} @ {job.get('company', '')}"
+    url = job.get("url", "")
+
+    if result.method == "already_applied":
+        return f"\u21a9\ufe0f *ALREADY APPLIED*\n{header}\n_{result.message}_"
+
+    if result.success:
+        return f"\u2705 *APPLIED* (Easy Apply)\n{header}\n_{result.message}_"
+
+    if result.method == "form_filled":
+        return (
+            "\u270d\ufe0f *FORM PRE-FILLED \u2014 review & submit*\n"
+            f"{header}\n"
+            "Your details and cover letter are filled in. Open the page, "
+            "double-check, and hit submit:\n"
+            f"{url}"
+        )
+
+    if result.method in ("screenshot_only", "external_redirect"):
+        reason = {
+            "screenshot_only": "No apply form detected \u2014 apply manually.",
+            "external_redirect": "Application is on an external site \u2014 apply manually.",
+        }[result.method]
+        return f"\u26a0\ufe0f *NEEDS MANUAL APPLY*\n{header}\n_{reason}_\n{url}"
+
+    return f"\u274c *APPLY FAILED*\n{header}\n_{result.message}_"
+
+
 async def _auto_apply(query, job_id: int, job: dict):
     """Apply to a single job (runs inside the serial apply worker)."""
     task = asyncio.current_task()
     _active_apply_tasks.add(task)
+    result = None
     try:
         result = await apply_to_single_job(job, headless=True)
-        method_label = {
-            "easy_apply": "Easy Apply \u2705",
-            "form_filled": "Form Filled \u2014 unconfirmed, verify manually",
-            "screenshot_only": "Screenshot Only \u2014 needs manual apply",
-            "external_redirect": "External Site \u2014 needs manual apply",
-            "error": "Error",
-        }.get(result.method, result.method)
-
-        if result.success:
-            text = f"\u2705 *APPLIED* ({method_label})\n{job['title']} @ {job['company']}\n_{result.message}_"
-        elif result.method in ("screenshot_only", "external_redirect", "form_filled"):
-            text = (
-                f"\u26a0\ufe0f *NEEDS MANUAL APPLY* ({method_label})\n"
-                f"{job['title']} @ {job['company']}\n"
-                f"_{result.message}_"
-            )
-        else:
-            text = f"\u274c *APPLY FAILED*\n{job['title']} @ {job['company']}\n_{result.message}_"
+        text = _format_apply_result(result, job)
     except Exception as e:
         logger.error(f"Auto-apply failed for job {job_id}: {e}")
         text = f"\u274c *APPLY FAILED*\n{job['title']} @ {job['company']}\n{str(e)[:100]}"
-        result = None
     finally:
         _active_apply_tasks.discard(task)
 

@@ -1,5 +1,12 @@
 """Tests for telegram_bot/bot.py — escape, formatting, callback parsing, task tracking."""
-from telegram_bot.bot import _active_apply_tasks, _escape_md, format_job_message, truncate
+from applicant.engine import ApplyResult
+from telegram_bot.bot import (
+    _active_apply_tasks,
+    _escape_md,
+    _format_apply_result,
+    format_job_message,
+    truncate,
+)
 
 
 class TestEscapeMd:
@@ -77,6 +84,48 @@ class TestFormatJobMessage:
         }
         msg = format_job_message(job, 1)
         assert "Not specified" in msg
+
+
+class TestFormatApplyResult:
+    """The apply-status message should make a pre-filled form read as useful,
+    not as a failure, and always surface the job URL for manual cases."""
+
+    JOB = {"title": "Senior PM", "company": "Acme", "url": "https://example.com/job"}
+
+    def test_form_filled_reads_as_actionable_not_failure(self):
+        result = ApplyResult(success=False, method="form_filled", message="unconfirmed")
+        msg = _format_apply_result(result, self.JOB)
+        assert "PRE-FILLED" in msg
+        assert "review" in msg.lower() and "submit" in msg.lower()
+        assert "NEEDS MANUAL APPLY" not in msg
+        assert self.JOB["url"] in msg  # one-tap follow-through
+
+    def test_screenshot_only_needs_manual_with_url(self):
+        result = ApplyResult(success=False, method="screenshot_only", message="no button")
+        msg = _format_apply_result(result, self.JOB)
+        assert "NEEDS MANUAL APPLY" in msg
+        assert self.JOB["url"] in msg
+
+    def test_external_redirect_needs_manual_with_url(self):
+        result = ApplyResult(success=False, method="external_redirect", message="redirect")
+        msg = _format_apply_result(result, self.JOB)
+        assert "NEEDS MANUAL APPLY" in msg
+        assert self.JOB["url"] in msg
+
+    def test_success_reads_as_applied(self):
+        result = ApplyResult(success=True, method="easy_apply", message="confirmed")
+        msg = _format_apply_result(result, self.JOB)
+        assert "APPLIED" in msg
+
+    def test_already_applied_distinct(self):
+        result = ApplyResult(success=True, method="already_applied", message="skipped")
+        msg = _format_apply_result(result, self.JOB)
+        assert "ALREADY APPLIED" in msg
+
+    def test_error_reads_as_failed(self):
+        result = ApplyResult(success=False, method="error", message="boom")
+        msg = _format_apply_result(result, self.JOB)
+        assert "APPLY FAILED" in msg
 
 
 class TestCallbackParsing:

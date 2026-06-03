@@ -1,4 +1,6 @@
 """Tests for scraper/filters.py — the job-classification pipeline."""
+import pytest
+
 from scraper.filters import (
     JobVerdict,
     check_sponsor_allowlist,
@@ -73,6 +75,32 @@ class TestClassifyRegion:
 
     def test_empty_location_unknown(self):
         assert classify_region({"location": "", "title": "PM", "description": ""}) == "unknown"
+
+
+class TestClassifyRegionBoundaries:
+    """Word-boundary regressions: substring matching used to misclassify these."""
+
+    # (location, title, description, expected_region)
+    CASES = [
+        # "uk" must NOT match inside "Milwaukee" (was wrongly EMEA); an
+        # unrecognized concrete location falls to "other", not a bogus region.
+        ("Milwaukee, WI", "", "", "other"),
+        # Pronoun "us" in prose must NOT read as USA when location is generic.
+        ("Remote", "PM", "We'd love for you to join us!", "unknown"),
+        # Legit signals still classify correctly.
+        ("London, UK", "", "", "emea"),
+        ("Remote — EMEA", "", "", "emea"),
+        ("Remote (EU)", "", "", "eu"),
+        ("Dublin, Ireland", "", "", "eu"),
+        ("Dubai, UAE", "", "", "emea"),
+        ("Remote - US", "", "", "us"),
+        ("Austin, TX", "", "", "us"),
+    ]
+
+    @pytest.mark.parametrize("location,title,description,expected", CASES)
+    def test_region(self, location, title, description, expected):
+        job = {"location": location, "title": title, "description": description}
+        assert classify_region(job) == expected
 
 
 class TestCheckSponsorAllowlist:

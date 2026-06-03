@@ -6,6 +6,9 @@ __pycache__/
 venv/
 *.db
 *.log
+.coverage
+.pytest_cache/
+.mypy_cache/
 config/resume.pdf
 config/resume.txt
 .playwright/
