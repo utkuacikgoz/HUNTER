@@ -35,6 +35,11 @@ def _csv_set(env_name: str, default: str) -> set[str]:
     return {item.strip().lower() for item in raw.split(",") if item.strip()}
 
 
+def _csv_list(env_name: str, default: str) -> list[str]:
+    raw = os.getenv(env_name, default)
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 # --- Region / sponsor filtering ---
 REGION_ALLOWLIST = _csv_set("REGION_ALLOWLIST", "us,eu,emea")
 REMOTE_REQUIRED = os.getenv("REMOTE_REQUIRED", "true").strip().lower() in {"1", "true", "yes", "y"}
@@ -47,6 +52,33 @@ SPONSOR_FRIENDLY_COMPANIES = _csv_set(
 )
 SPONSOR_BLOCKLIST_COMPANIES = _csv_set("SPONSOR_BLOCKLIST_COMPANIES", "")
 ENABLE_LLM_SPONSOR_SCORING = os.getenv("ENABLE_LLM_SPONSOR_SCORING", "false").strip().lower() in {"1", "true", "yes", "y"}
+
+# --- ATS catalog sources (Greenhouse / Lever / Ashby) ---
+# Values are board *tokens* (not display names). Defaults are live-verified
+# (2026-06-04); find a token by hitting e.g.
+# boards-api.greenhouse.io/v1/boards/{token}/jobs (200 + non-empty jobs = valid).
+GREENHOUSE_BOARDS = _csv_list(
+    "GREENHOUSE_BOARDS",
+    "stripe,datadog,mongodb,canonical,cloudflare,figma,gitlab,elastic,postman,"
+    "vercel,discord,mozilla,mattermost,remote",
+)
+LEVER_BOARDS = _csv_list("LEVER_BOARDS", "spotify,toptal")
+ASHBY_BOARDS = _csv_list(
+    "ASHBY_BOARDS",
+    "notion,1password,clickup,deel,n8n,linear,zapier,supabase,buffer",
+)
+# Catalog sources list every role on a board; keep only titles containing one of
+# these (case-insensitive substring). Anchored on the role function (…manager /
+# lead / owner / head / director / vp of product) so "Staff Product Designer" and
+# similar non-PM roles drop out. Override via env for a different target.
+ROLE_MATCH_KEYWORDS = _csv_list(
+    "ROLE_MATCH_KEYWORDS",
+    "product manager,product management,product lead,lead product manager,"
+    "head of product,product owner,director of product,vp of product,vp product,"
+    "chief product,group product manager,principal product manager,"
+    "senior product manager,staff product manager,technical product manager,"
+    "platform product manager",
+)
 
 # --- Scraper health / selector overrides ---
 # Comma-separated Playwright selectors tried in order. Add new variants as Wellfound DOM drifts.
