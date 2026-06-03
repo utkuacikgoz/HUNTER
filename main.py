@@ -93,14 +93,22 @@ async def _scrape_all() -> list[dict]:
         scraper_jobs: list[dict] = []
         try:
             async with scraper:
-                for query in queries:
-                    # Scrapers currently ignore `location` but we still pass it.
+                if getattr(scraper, "accepts_query", True):
+                    for query in queries:
+                        # Scrapers currently ignore `location` but we still pass it.
+                        jobs = await scraper.scrape(
+                            query=query, location=location, max_results=per_platform,
+                        )
+                        scraper_jobs.extend(jobs)
+                        if len(all_jobs) + len(scraper_jobs) >= MAX_JOBS_PER_DAY * 2:
+                            break
+                else:
+                    # Catalog source (e.g. an ATS board): fetch once, it filters
+                    # its own catalog against the configured queries internally.
                     jobs = await scraper.scrape(
-                        query=query, location=location, max_results=per_platform,
+                        query="", location=location, max_results=per_platform,
                     )
                     scraper_jobs.extend(jobs)
-                    if len(all_jobs) + len(scraper_jobs) >= MAX_JOBS_PER_DAY * 2:
-                        break
         except Exception as e:
             logger.error(f"Scraper {platform} failed: {e}")
         finally:

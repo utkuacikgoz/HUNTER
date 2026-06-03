@@ -1,65 +1,30 @@
-"""RemoteOK job scraper - uses their JSON API."""
+"""RemoteOK job source — uses their public JSON API (no browser)."""
 import logging
-import random
 
-import aiohttp
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
-
-from config.settings import USER_AGENTS
-from scraper.base import BaseScraper
+from scraper.base import ApiSource
 
 logger = logging.getLogger(__name__)
 
 
-class RemoteOKScraper(BaseScraper):
+class RemoteOKScraper(ApiSource):
     platform_name = "remoteok"
-
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=2, min=2, max=30),
-        retry=retry_if_exception_type((aiohttp.ClientError, TimeoutError)),
-        reraise=True,
-    )
-    async def _fetch_api(self, api_url: str):
-        """Fetch RemoteOK JSON API with retry on transient failures."""
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                api_url,
-                headers={"User-Agent": random.choice(USER_AGENTS)},
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                if resp.status == 429:
-                    logger.warning("RemoteOK: rate limited (429), retrying...")
-                    raise aiohttp.ClientError("Rate limited")
-                if resp.status != 200:
-                    logger.warning(f"RemoteOK: status {resp.status}")
-                    return None
-                try:
-                    return await resp.json(content_type=None)
-                except Exception as e:
-                    logger.error(f"RemoteOK: invalid JSON response: {e}")
-                    return None
 
     async def scrape(self, query: str, location: str = "", max_results: int = 10) -> list[dict]:
         jobs: list[dict] = []
         try:
             tag = query.lower().replace(" ", "-")
             api_url = f"https://remoteok.com/api?tag={tag}"
-
             logger.info(f"RemoteOK: fetching {api_url}")
 
-            data = await self._fetch_api(api_url)
-
+            data = await self._get_json(api_url)
             if data is None:
                 return jobs
-
             if not isinstance(data, list):
                 logger.warning(f"RemoteOK: unexpected response type {type(data)}")
                 return jobs
 
-            # First element is metadata, skip it
+            # First element is metadata, skip it.
             listings = data[1:] if len(data) > 1 else []
-
             for item in listings[:max_results]:
                 try:
                     title = item.get("position", "")
