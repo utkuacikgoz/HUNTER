@@ -30,6 +30,7 @@ from config.settings import (
     VELOCITY_WINDOW_DAYS,
     validate_config,
 )
+from scraper.ats import AshbySource, GreenhouseSource, LeverSource
 from scraper.filters import evaluate_job_async
 from scraper.remoteok import RemoteOKScraper
 from scraper.wellfound import WellfoundScraper
@@ -75,6 +76,9 @@ async def _scrape_all() -> list[dict]:
         # LinkedInScraper(headless=True),  # Disabled - session-cookie issues; kept for Phase 3 hybrid apply
         WellfoundScraper(headless=True),
         RemoteOKScraper(headless=True),
+        GreenhouseSource(),
+        LeverSource(),
+        AshbySource(),
     ]
     per_platform = MAX_JOBS_PER_DAY // len(scrapers)
     location = LOCATIONS[0] if LOCATIONS else ""
