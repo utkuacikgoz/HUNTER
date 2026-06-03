@@ -57,14 +57,25 @@ ENABLE_LLM_SPONSOR_SCORING = os.getenv("ENABLE_LLM_SPONSOR_SCORING", "false").st
 # Values are board *tokens* (not display names). Defaults are live-verified
 # (2026-06-04); find a token by hitting e.g.
 # boards-api.greenhouse.io/v1/boards/{token}/jobs (200 + non-empty jobs = valid).
+# Tier-2/3 scale-ups are listed FIRST so they fill the per-run job cap before the
+# tier-1 giants (each source stops once it has enough roles). All board tokens are
+# live-verified (2026-06-04).
 GREENHOUSE_BOARDS = _csv_list(
     "GREENHOUSE_BOARDS",
+    # tier-2/3 (fintech / crypto / marketplace / saas)
+    "gocardless,form3,tide,truelayer,mercury,fireblocks,bitpanda,nansen,faire,"
+    "wallapop,gigs,contentful,typeform,planetscale,"
+    # tier-1
     "stripe,datadog,mongodb,canonical,cloudflare,figma,gitlab,elastic,postman,"
     "vercel,discord,mozilla,mattermost,remote",
 )
-LEVER_BOARDS = _csv_list("LEVER_BOARDS", "spotify,toptal")
+LEVER_BOARDS = _csv_list("LEVER_BOARDS", "qonto,vestiairecollective,spotify,toptal")
 ASHBY_BOARDS = _csv_list(
     "ASHBY_BOARDS",
+    # tier-2/3
+    "pleo,mollie,pennylane,sardine,taktile,swan,ramp,ledger,blockdaemon,safe,"
+    "paxos,backmarket,gorgias,posthog,workos,"
+    # tier-1
     "notion,1password,clickup,deel,n8n,linear,zapier,supabase,buffer",
 )
 # Catalog sources list every role on a board; keep only titles containing one of

@@ -38,6 +38,13 @@ class TestAtsCommon:
         assert "spotify" in LeverSource().boards
         assert "deel" in AshbySource().boards
 
+    def test_tier23_boards_listed_before_tier1(self):
+        # Tier-2/3 scale-ups must come first so they fill the per-run cap before giants.
+        gh = GreenhouseSource().boards
+        assert "gocardless" in gh and gh.index("gocardless") < gh.index("stripe")
+        ash = AshbySource().boards
+        assert "pleo" in ash and ash.index("pleo") < ash.index("notion")
+
     def test_title_match_keeps_product_drops_other(self):
         s = GreenhouseSource(boards=[])
         assert s._title_matches("Senior Product Manager")
