@@ -84,8 +84,6 @@ class AutoApplicant:
 
             if platform == "linkedin":
                 result = await self._apply_linkedin(job, cover_letter)
-            elif platform == "indeed":
-                result = await self._apply_indeed(job, cover_letter)
             elif platform == "wellfound":
                 result = await self._apply_wellfound(job, cover_letter)
             else:
@@ -321,67 +319,6 @@ class AutoApplicant:
             return COMMON_ANSWERS["availability"]
 
         return ""
-
-    async def _apply_indeed(self, job: dict, cover_letter: str) -> ApplyResult:
-        """Apply via Indeed."""
-        context = await self._new_context()
-        page = await context.new_page()
-
-        try:
-            await page.goto(job["url"], wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
-            await asyncio.sleep(PAGE_SETTLE_S)
-
-            apply_btn = await page.query_selector(
-                "button[id*='applyButton'], "
-                "a[id*='applyButton'], "
-                "button:has-text('Apply now'), "
-                "a:has-text('Apply on company site')"
-            )
-
-            method = "screenshot_only"
-            message = "Job page opened but no application was submitted."
-
-            if apply_btn:
-                btn_text = (await apply_btn.inner_text()).strip().lower()
-                href = await apply_btn.get_attribute("href")
-                if href or "company site" in btn_text:
-                    # External application - can't auto-apply
-                    if href:
-                        await page.goto(href, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
-                        await asyncio.sleep(PAGE_SETTLE_S)
-                    method = "external_redirect"
-                    message = "Redirected to external site. Needs manual application."
-                else:
-                    await apply_btn.click()
-                    await asyncio.sleep(PAGE_SETTLE_S)
-                    # Fill any visible forms
-                    await self._fill_generic_form(page, job, cover_letter)
-                    method = "form_filled"
-                    message = "Applied via Indeed form (unconfirmed)."
-
-            ss_path = str(SCREENSHOTS_DIR / f"indeed_{job['id']}.png")
-            await page.screenshot(path=ss_path)
-
-            # form_filled means we filled inputs but never confirmed a submission,
-            # so we do NOT report success — it surfaces as "needs manual" instead.
-            actually_applied = False
-            return ApplyResult(
-                success=actually_applied, method=method,
-                screenshot_path=ss_path, message=message,
-            )
-
-        except Exception as e:
-            logger.error(f"Indeed apply error: {e}")
-            return ApplyResult(success=False, method="error", message=str(e)[:200])
-        finally:
-            try:
-                await page.close()
-            except Exception as e:
-                logger.debug(f"page.close failed: {e}")
-            try:
-                await context.close()
-            except Exception as e:
-                logger.debug(f"context.close failed: {e}")
 
     async def _apply_wellfound(self, job: dict, cover_letter: str) -> ApplyResult:
         """Apply via Wellfound."""

@@ -72,9 +72,7 @@ logger = logging.getLogger("hunter")
 async def _scrape_all() -> list[dict]:
     """Run every enabled scraper. Skips scrapers stuck on zero-yield streaks."""
     scrapers = [
-        # LinkedInScraper(headless=True),  # Skipped - cookie issues
-        # IndeedScraper(headless=True),  # Skipped
-        # GlassdoorScraper(headless=True),  # Skipped
+        # LinkedInScraper(headless=True),  # Disabled - session-cookie issues; kept for Phase 3 hybrid apply
         WellfoundScraper(headless=True),
         RemoteOKScraper(headless=True),
     ]

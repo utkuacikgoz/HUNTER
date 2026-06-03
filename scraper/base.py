@@ -5,7 +5,7 @@ import random
 from abc import ABC, abstractmethod
 from urllib.parse import urlparse
 
-from playwright.async_api import Browser, Page, async_playwright
+from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
 from config.settings import (
     PROXY_URL,
@@ -57,7 +57,8 @@ class BaseScraper(ABC):
             except Exception as e:
                 logger.warning(f"{self.platform_name}: playwright.stop failed: {e}")
 
-    async def new_page(self, cookies=None) -> tuple[Page, object]:
+    async def new_page(self, cookies=None) -> tuple[Page, BrowserContext]:
+        assert self._browser is not None, "browser not started — use 'async with scraper:'"
         ua = random.choice(USER_AGENTS)
         context = await self._browser.new_context(
             user_agent=ua,

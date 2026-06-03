@@ -21,10 +21,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.lock
-          pip install pytest==8.3.4 pytest-asyncio==0.25.0 ruff==0.8.4
+          pip install pytest==8.3.4 pytest-asyncio==0.25.0 pytest-cov==6.0.0 \
+            ruff==0.8.4 mypy==1.13.0 types-pytz==2024.2.0.20241003
 
       - name: Lint
         run: ruff check .
 
+      - name: Type check
+        run: mypy
+
       - name: Test
-        run: pytest -q
+        run: pytest -q --cov=. --cov-report=term-missing

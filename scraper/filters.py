@@ -36,19 +36,17 @@ class JobVerdict:
     reasons: list[str] = field(default_factory=list)
 
 
+# Region tokens are matched word-boundary-safe via _normalize/_has below, so
+# "uk" no longer hits inside "Milwaukee" and the pronoun "us" no longer reads as
+# the USA. Tokens are stored already normalized (lowercase, no punctuation).
+
+# Unambiguous tokens — safe to match anywhere (location + title + description).
 _US_TOKENS = {
-    "united states", "usa", "u.s.", "u.s.a", " us ",
-    "remote - us", "remote us", "us-remote", "us only", "us-based",
-}
-# Common US state names and abbreviations that imply a US-only location when standalone.
-_US_STATE_HINTS = {
-    "california", "new york", "texas", "florida", "washington", "massachusetts",
-    "illinois", "georgia", "colorado", "oregon", "ohio", "virginia", "michigan",
-    "north carolina", "pennsylvania", "san francisco", "seattle", "boston", "austin",
-    "chicago", "denver", "los angeles", "nyc",
+    "united states", "usa", "u s a", "us only", "us based",
+    "us remote", "remote us",
 }
 _EU_TOKENS = {
-    "european union", "europe", "eu ", "eu-", "eu/", " eu)", "eea",
+    "european union", "europe", "eu", "eea",
     "germany", "france", "spain", "italy", "netherlands", "ireland", "portugal",
     "poland", "sweden", "denmark", "finland", "norway", "belgium", "austria",
     "czech", "romania", "greece", "hungary", "estonia", "lithuania", "latvia",
@@ -57,14 +55,35 @@ _EU_TOKENS = {
 }
 _EMEA_TOKENS = {
     "emea", "middle east", "africa", "mena",
-    "turkey", "türkiye", "istanbul", "ankara", "izmir",
+    "turkey", "turkiye", "istanbul", "ankara", "izmir",
     "uae", "united arab emirates", "dubai", "abu dhabi",
     "saudi arabia", "ksa", "riyadh",
     "qatar", "doha", "bahrain", "kuwait", "oman", "jordan", "israel", "tel aviv",
     "egypt", "cairo", "morocco", "south africa", "johannesburg", "cape town",
     "london", "uk", "united kingdom", "britain", "england", "scotland",
 }
+# Short / ambiguous tokens — only trusted in the structured location field, never
+# free-text description (avoids "join us" -> USA, state names appearing in prose).
+_US_LOC_ONLY = {"us"}
+_US_STATE_HINTS = {
+    "california", "new york", "texas", "florida", "washington", "massachusetts",
+    "illinois", "georgia", "colorado", "oregon", "ohio", "virginia", "michigan",
+    "north carolina", "pennsylvania", "san francisco", "seattle", "boston", "austin",
+    "chicago", "denver", "los angeles", "nyc",
+}
 _REMOTE_TOKENS = {"remote", "work from home", "wfh", "anywhere", "distributed", "fully remote"}
+
+_NON_ALNUM = re.compile(r"[^a-z0-9]+")
+
+
+def _normalize(text: str | None) -> str:
+    """Lowercase, collapse punctuation to spaces, pad — makes token checks
+    word-boundary safe (a token matches only when surrounded by spaces)."""
+    return f" {_NON_ALNUM.sub(' ', (text or '').lower()).strip()} "
+
+
+def _has(normalized: str, tokens: set[str]) -> bool:
+    return any(f" {tok} " in normalized for tok in tokens)
 
 _US_ONLY_BLOCKERS = re.compile(
     r"(?i)("
@@ -101,33 +120,27 @@ def detect_remote(job: dict) -> bool:
 
 
 def classify_region(job: dict) -> Region:
-    """Best-effort region classification from title + location + description."""
-    location = (job.get("location") or "").lower()
-    title = (job.get("title") or "").lower()
-    description = (job.get("description") or "").lower()
+    """Best-effort region from location (primary) + title + description (secondary).
 
-    # Prefer matching against the structured location first, fall back to broader text.
-    loc_hay = f" {location} "
-    full_hay = f" {location} {title} {description} "
-
-    emea_hit = any(t in loc_hay for t in _EMEA_TOKENS) or any(t in full_hay for t in _EMEA_TOKENS)
-    eu_hit = any(t in loc_hay for t in _EU_TOKENS) or any(t in full_hay for t in _EU_TOKENS)
-    us_hit = (
-        any(t in loc_hay for t in _US_TOKENS)
-        or any(t in full_hay for t in _US_TOKENS)
-        or any(s in loc_hay for s in _US_STATE_HINTS)
+    Strong tokens (countries, cities, multi-word) are matched everywhere; short
+    ambiguous tokens ("us", US state names) only against the structured location
+    field. EMEA wins over EU (it subsumes UK/Middle East/Africa), EU over US.
+    """
+    location = _normalize(job.get("location"))
+    full = _normalize(
+        f"{job.get('location') or ''} {job.get('title') or ''} {job.get('description') or ''}"
     )
 
-    # EMEA includes UK + ME + Africa; prefer it over plain EU if both match.
-    if emea_hit:
+    if _has(full, _EMEA_TOKENS):
         return "emea"
-    if eu_hit:
+    if _has(full, _EU_TOKENS):
         return "eu"
-    if us_hit:
+    if _has(full, _US_TOKENS) or _has(location, _US_LOC_ONLY) or _has(location, _US_STATE_HINTS):
         return "us"
 
-    # Plain "Remote" with no country signal: unknown (let it be flagged, not dropped).
-    if any(t in loc_hay for t in _REMOTE_TOKENS) or not location.strip():
+    # Plain "Remote" with no country signal, or no location at all: unknown
+    # (so it gets flagged for human review, not silently dropped).
+    if _has(location, _REMOTE_TOKENS) or not location.strip():
         return "unknown"
     return "other"
 
