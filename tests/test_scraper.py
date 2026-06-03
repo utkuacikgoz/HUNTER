@@ -1,6 +1,7 @@
 """Tests for scraper/base.py and scraper/linkedin.py."""
-from scraper.base import BaseScraper
+from scraper.base import ApiSource, BaseScraper, BrowserSource, JobSource
 from scraper.linkedin import LinkedInScraper
+from scraper.remoteok import RemoteOKScraper
 
 
 class ConcreteScraper(BaseScraper):
@@ -44,6 +45,87 @@ class TestNormalizeJob:
         job = self.scraper._normalize_job("PM", "Co", "NYC", "$100k", "https://x.com", "desc")
         expected_keys = {"title", "company", "location", "salary", "url", "platform", "description"}
         assert set(job.keys()) == expected_keys
+
+
+class TestSourceHierarchy:
+    """The interface split: BrowserSource vs ApiSource, with BaseScraper alias."""
+
+    def test_basescraper_is_browsersource_alias(self):
+        assert BaseScraper is BrowserSource
+
+    def test_browser_and_api_share_jobsource(self):
+        assert issubclass(BrowserSource, JobSource)
+        assert issubclass(ApiSource, JobSource)
+
+    def test_remoteok_is_api_source_not_browser(self):
+        # RemoteOK is a pure JSON-API source and must never pull in the browser.
+        assert issubclass(RemoteOKScraper, ApiSource)
+        assert not issubclass(RemoteOKScraper, BrowserSource)
+        assert not hasattr(RemoteOKScraper(), "_browser")
+
+    def test_default_accepts_query(self):
+        assert RemoteOKScraper().accepts_query is True
+
+
+class _FakeResp:
+    def __init__(self, status, payload=None, raise_json=False):
+        self.status = status
+        self._payload = payload
+        self._raise_json = raise_json
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def json(self, content_type=None):
+        if self._raise_json:
+            raise ValueError("bad json")
+        return self._payload
+
+
+class _FakeSession:
+    def __init__(self, resp):
+        self._resp = resp
+
+    def get(self, *a, **k):
+        return self._resp
+
+    async def close(self):
+        pass
+
+
+class _DummyApi(ApiSource):
+    platform_name = "dummy"
+
+    async def scrape(self, query, location="", max_results=10):
+        return []
+
+
+class TestApiSourceGetJson:
+    async def test_200_returns_parsed_json(self):
+        src = _DummyApi()
+        src._session = _FakeSession(_FakeResp(200, {"ok": 1}))
+        assert await src._get_json("http://x") == {"ok": 1}
+
+    async def test_non_200_returns_none(self):
+        src = _DummyApi()
+        src._session = _FakeSession(_FakeResp(404))
+        assert await src._get_json("http://x") is None
+
+    async def test_unparseable_json_returns_none(self):
+        src = _DummyApi()
+        src._session = _FakeSession(_FakeResp(200, raise_json=True))
+        assert await src._get_json("http://x") is None
+
+    async def test_context_manager_opens_and_closes_session(self):
+        src = _DummyApi()
+        assert src._session is None
+        async with src as s:
+            assert s is src
+            assert s._session is not None  # real aiohttp session, no network
+        assert src._session.closed
 
 
 class TestLinkedInCleanUrl:
