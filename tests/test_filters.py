@@ -5,6 +5,7 @@ from scraper.filters import (
     JobVerdict,
     check_sponsor_allowlist,
     classify_region,
+    detect_country_locked_remote,
     detect_remote,
     detect_us_only_blocker,
     evaluate_job,
@@ -103,6 +104,43 @@ class TestClassifyRegionBoundaries:
         assert classify_region(job) == expected
 
 
+class TestDetectCountryLockedRemote:
+    """US/Canada-locked remote roles: candidate is EMEA, so these should drop."""
+
+    # The three real examples from production (form3 / mercury / paxos).
+    LOCKED = [
+        "100% Remote (US/Canada*)",
+        "San Francisco, CA, New York, NY, Portland, OR, or Remote within Canada or United States",
+        "Remote - United States",
+        "Remote - US",
+        "Remote (USA only)",
+        "Remote, Canada",
+    ]
+    # Open to the candidate or global → not a lock.
+    NOT_LOCKED = [
+        "Remote - EMEA",
+        "Remote (EU)",
+        "Remote - US, UK",          # also opens to UK (EMEA)
+        "Remote - Worldwide",
+        "Remote (Anywhere)",
+        "Remote",                    # no country at all
+        "London, UK",               # not even US/Canada
+    ]
+
+    @pytest.mark.parametrize("location", LOCKED)
+    def test_locked(self, location):
+        assert detect_country_locked_remote({"location": location}) is not None
+
+    @pytest.mark.parametrize("location", NOT_LOCKED)
+    def test_not_locked(self, location):
+        assert detect_country_locked_remote({"location": location}) is None
+
+    def test_onsite_us_is_not_locked_remote(self):
+        # On-site (no remote token) isn't a "locked remote" — handled by the
+        # not-remote drop instead.
+        assert detect_country_locked_remote({"location": "San Francisco, CA"}) is None
+
+
 class TestCheckSponsorAllowlist:
     def test_known_friendly_company(self):
         # Stripe is in the default SPONSOR_FRIENDLY_COMPANIES.
@@ -183,15 +221,39 @@ class TestEvaluateJob:
         assert v.verdict == "flag"
         assert v.region == "unknown"
 
-    def test_us_remote_allowlist_includes(self):
+    def test_us_locked_remote_drops_even_for_allowlist_company(self):
+        # Cloudflare is sponsor-friendly, but a US-locked posting still won't take
+        # an overseas candidate — the country lock takes precedence over allowlist.
         v = evaluate_job({
             "title": "PM",
             "company": "Cloudflare",
             "location": "Remote - US",
             "description": "",
         })
-        assert v.verdict == "include"
-        assert v.region == "us"
+        assert v.verdict == "drop"
+        assert "locked to US/Canada" in v.reasons[0]
+
+    def test_us_canada_locked_remote_drops(self):
+        # The form3 production case: unknown sponsor, "100% Remote (US/Canada)".
+        v = evaluate_job({
+            "title": "Product Owner - US Payments",
+            "company": "form3",
+            "location": "100% Remote (US/Canada*)",
+            "description": "Join our payments team.",
+        })
+        assert v.verdict == "drop"
+        assert "locked to US/Canada" in v.reasons[0]
+
+    def test_emea_remote_unknown_sponsor_still_flags(self):
+        # The lock check must not over-reach: EMEA remote stays a flag, not a drop.
+        v = evaluate_job({
+            "title": "Senior PM",
+            "company": "SomeFintech",
+            "location": "Remote - EMEA",
+            "description": "Pan-European team.",
+        })
+        assert v.verdict == "flag"
+        assert v.region == "emea"
 
     def test_verdict_dataclass_fields(self):
         v = JobVerdict(

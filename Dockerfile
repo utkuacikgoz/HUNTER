@@ -1,8 +1,12 @@
 FROM python:3.12-slim
 
+# PLAYWRIGHT_BROWSERS_PATH installs browsers to a shared, world-readable path so
+# the non-root `hunter` runtime user finds them (root's ~/.cache would not be
+# readable, causing "Executable doesn't exist at .../ms-playwright/...").
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    DEBIAN_FRONTEND=noninteractive
+    DEBIAN_FRONTEND=noninteractive \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 WORKDIR /app
 
@@ -17,7 +21,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements.lock .
 RUN pip install --no-cache-dir -r requirements.lock \
-    && playwright install chromium --with-deps
+    && playwright install chromium --with-deps \
+    && chmod -R a+rX /ms-playwright
 
 COPY . .
 
