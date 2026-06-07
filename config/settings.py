@@ -30,6 +30,11 @@ LOCATIONS = [loc.strip() for loc in os.getenv("LOCATIONS", "EMEA,Remote,US").spl
 MAX_JOBS_PER_DAY = int(os.getenv("MAX_JOBS_PER_DAY", "50"))
 # How many of SEARCH_QUERIES to run per scrape (0 = all). Previously hardcoded to 3.
 MAX_QUERIES_PER_RUN = int(os.getenv("MAX_QUERIES_PER_RUN", "0"))
+# Max roles to pull from a SINGLE source per run. Defaults to MAX_JOBS_PER_DAY so a
+# single rich board (e.g. a Greenhouse catalog with 20 PM roles) isn't throttled to
+# a tiny per-source slice — the target-driven loop then dedups/filters down to the
+# day's fresh quota. Raise for more breadth, lower to rate-limit a noisy source.
+SOURCE_FETCH_CAP = int(os.getenv("SOURCE_FETCH_CAP", str(MAX_JOBS_PER_DAY)))
 
 
 def _csv_set(env_name: str, default: str) -> set[str]:
@@ -72,21 +77,33 @@ GREENHOUSE_BOARDS = _csv_list(
     # tier-2/3 (fintech / crypto / marketplace / saas)
     "gocardless,form3,tide,truelayer,mercury,fireblocks,bitpanda,nansen,faire,"
     "wallapop,gigs,contentful,typeform,planetscale,"
-    # EU/EMEA-focused (live-verified 2026-06-07; hire product in EU/EMEA)
+    # EU/EMEA-focused (live-verified 2026-06-07/08; hire product in EU/EMEA)
     "monzo,sumup,getyourguide,doctolib,celonis,wolt,n26,hellofresh,trustpilot,"
+    "skyscanner,unity3d,adyen,algolia,raisin,cleo,"
     # tier-1
     "stripe,datadog,mongodb,canonical,cloudflare,figma,gitlab,elastic,postman,"
     "vercel,discord,mozilla,mattermost,remote",
 )
-LEVER_BOARDS = _csv_list("LEVER_BOARDS", "qonto,vestiairecollective,spotify,toptal")
+LEVER_BOARDS = _csv_list(
+    "LEVER_BOARDS",
+    # live-verified 2026-06-08: mistral/contentsquare (Paris) added
+    "qonto,vestiairecollective,spotify,toptal,mistral,contentsquare",
+)
 ASHBY_BOARDS = _csv_list(
     "ASHBY_BOARDS",
     # tier-2/3
     "pleo,mollie,pennylane,sardine,taktile,swan,ramp,ledger,blockdaemon,safe,"
     "paxos,backmarket,gorgias,posthog,workos,fonoa,"
+    # EU/EMEA-focused (live-verified 2026-06-08)
+    "synthesia,alan,tacto,wayve,"
     # tier-1
     "notion,1password,clickup,deel,n8n,linear,zapier,supabase,buffer",
 )
+# Recruitee boards — subdomain token (https://{token}.recruitee.com/api/offers/).
+RECRUITEE_BOARDS = _csv_list("RECRUITEE_BOARDS", "bunq,sendcloud")
+# SmartRecruiters company identifiers (case-sensitive, as in their posting API
+# https://api.smartrecruiters.com/v1/companies/{id}/postings).
+SMARTRECRUITERS_COMPANIES = _csv_list("SMARTRECRUITERS_COMPANIES", "Visa")
 # Catalog sources list every role on a board; keep only titles containing one of
 # these (case-insensitive substring). Anchored on the role function (…manager /
 # lead / owner / head / director / vp of product) so "Staff Product Designer" and

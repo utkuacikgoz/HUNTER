@@ -15,7 +15,9 @@ from config.settings import (
     ASHBY_BOARDS,
     GREENHOUSE_BOARDS,
     LEVER_BOARDS,
+    RECRUITEE_BOARDS,
     ROLE_MATCH_KEYWORDS,
+    SMARTRECRUITERS_COMPANIES,
 )
 from scraper.base import ApiSource
 
@@ -111,6 +113,61 @@ class LeverSource(AtsSource):
             desc = j.get("descriptionPlain", "") or ""
             if title and url_j:
                 out.append(self._normalize_job(title, board, loc, "", url_j, desc[:500]))
+        return out
+
+
+class RecruiteeSource(AtsSource):
+    platform_name = "recruitee"
+
+    def __init__(self, headless: bool = True, boards: list[str] | None = None):
+        super().__init__(headless, RECRUITEE_BOARDS if boards is None else boards)
+
+    async def _fetch_board(self, board: str) -> list[dict]:
+        url = f"https://{board}.recruitee.com/api/offers/"
+        data = await self._get_json(url)
+        if not isinstance(data, dict):
+            return []
+        out = []
+        for j in data.get("offers", []):
+            title = j.get("title", "")
+            if not self._title_matches(title):
+                continue
+            loc = j.get("location") or ", ".join(
+                p for p in (j.get("city"), j.get("country")) if p
+            )
+            url_j = j.get("careers_url") or j.get("careers_apply_url", "")
+            desc = _strip_html(j.get("description", ""))
+            if title and url_j:
+                out.append(self._normalize_job(title, board, loc, "", url_j, desc[:500]))
+        return out
+
+
+class SmartRecruitersSource(AtsSource):
+    platform_name = "smartrecruiters"
+
+    def __init__(self, headless: bool = True, boards: list[str] | None = None):
+        super().__init__(headless, SMARTRECRUITERS_COMPANIES if boards is None else boards)
+
+    async def _fetch_board(self, board: str) -> list[dict]:
+        url = f"https://api.smartrecruiters.com/v1/companies/{board}/postings?limit=100"
+        data = await self._get_json(url)
+        if not isinstance(data, dict):
+            return []
+        out = []
+        for j in data.get("content", []):
+            title = j.get("name", "")
+            if not self._title_matches(title):
+                continue
+            loc_obj = j.get("location") or {}
+            parts = [loc_obj.get("city"), loc_obj.get("country")]
+            loc = loc_obj.get("fullLocation") or ", ".join(p for p in parts if p)
+            if loc_obj.get("remote"):
+                loc = f"Remote - {loc}" if loc else "Remote"
+            # The list API omits the public apply URL; build it from the posting id.
+            posting_id = j.get("id") or (j.get("ref", "").rstrip("/").rsplit("/", 1)[-1])
+            url_j = f"https://jobs.smartrecruiters.com/{board}/{posting_id}" if posting_id else ""
+            if title and url_j:
+                out.append(self._normalize_job(title, board, loc, "", url_j, ""))
         return out
 
 

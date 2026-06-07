@@ -25,13 +25,20 @@ from config.settings import (
     MAX_QUERIES_PER_RUN,
     SCRAPER_SKIP_AFTER_ZEROS,
     SEARCH_QUERIES,
+    SOURCE_FETCH_CAP,
     TELEGRAM_BOT_TOKEN,
     VELOCITY_BOOST_RANK,
     VELOCITY_HOT_THRESHOLD,
     VELOCITY_WINDOW_DAYS,
     validate_config,
 )
-from scraper.ats import AshbySource, GreenhouseSource, LeverSource
+from scraper.ats import (
+    AshbySource,
+    GreenhouseSource,
+    LeverSource,
+    RecruiteeSource,
+    SmartRecruitersSource,
+)
 from scraper.filters import evaluate_job_async
 from scraper.remoteok import RemoteOKScraper
 from scraper.wellfound import WellfoundScraper
@@ -77,20 +84,31 @@ logger = logging.getLogger("hunter")
 
 async def _scrape_all() -> list[dict]:
     """Run every enabled scraper. Skips scrapers stuck on zero-yield streaks."""
+    # ATS catalog (API) sources first — reliable and cheap — so they fill the day's
+    # fresh quota before the slower/flakier browser scrapers. Each source may return
+    # up to SOURCE_FETCH_CAP; the downstream dedup+filter trims to MAX_JOBS_PER_DAY.
     scrapers = [
         # LinkedInScraper(headless=True),  # Disabled - session-cookie issues; kept for Phase 3 hybrid apply
+        GreenhouseSource(),
+        AshbySource(),
+        LeverSource(),
+        RecruiteeSource(),
+        SmartRecruitersSource(),
         WellfoundScraper(headless=True),
         RemoteOKScraper(headless=True),
-        GreenhouseSource(),
-        LeverSource(),
-        AshbySource(),
     ]
-    per_platform = MAX_JOBS_PER_DAY // len(scrapers)
+    fetch_cap = max(1, SOURCE_FETCH_CAP)
+    # Bound total raw collection so a quiet filter run can't OOM the box; the
+    # classifier stops at MAX_JOBS_PER_DAY fresh regardless.
+    collect_ceiling = MAX_JOBS_PER_DAY * 4
     location = LOCATIONS[0] if LOCATIONS else ""
     queries = SEARCH_QUERIES if MAX_QUERIES_PER_RUN <= 0 else SEARCH_QUERIES[:MAX_QUERIES_PER_RUN]
 
     all_jobs: list[dict] = []
     for scraper in scrapers:
+        if len(all_jobs) >= collect_ceiling:
+            logger.info(f"Collection ceiling {collect_ceiling} reached; stopping early.")
+            break
         platform = scraper.platform_name
         if should_skip_scraper(platform, SCRAPER_SKIP_AFTER_ZEROS):
             logger.warning(
@@ -106,16 +124,16 @@ async def _scrape_all() -> list[dict]:
                     for query in queries:
                         # Scrapers currently ignore `location` but we still pass it.
                         jobs = await scraper.scrape(
-                            query=query, location=location, max_results=per_platform,
+                            query=query, location=location, max_results=fetch_cap,
                         )
                         scraper_jobs.extend(jobs)
-                        if len(all_jobs) + len(scraper_jobs) >= MAX_JOBS_PER_DAY * 2:
+                        if len(scraper_jobs) >= fetch_cap:
                             break
                 else:
                     # Catalog source (e.g. an ATS board): fetch once, it filters
                     # its own catalog against the configured queries internally.
                     jobs = await scraper.scrape(
-                        query="", location=location, max_results=per_platform,
+                        query="", location=location, max_results=fetch_cap,
                     )
                     scraper_jobs.extend(jobs)
         except Exception as e:
