@@ -33,9 +33,11 @@ primary_region = "iad"
   DB_PATH = "/data/hunter.db"
   LOG_LEVEL = "INFO"
   CLAUDE_MODEL = "claude-sonnet-4-6"
+  # Let Claude resolve "unknown sponsor" jobs into include/drop (small API cost
+  # per uncertain job; ANTHROPIC_API_KEY must be set as a secret).
+  ENABLE_LLM_SPONSOR_SCORING = "true"
   # Add any other non-secret overrides here, e.g.:
   #   MAX_JOBS_PER_DAY = "50"
-  #   ENABLE_LLM_SPONSOR_SCORING = "false"
 
 # Persistent volume for the SQLite database.
 [[mounts]]

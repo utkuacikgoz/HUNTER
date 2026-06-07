@@ -72,6 +72,8 @@ GREENHOUSE_BOARDS = _csv_list(
     # tier-2/3 (fintech / crypto / marketplace / saas)
     "gocardless,form3,tide,truelayer,mercury,fireblocks,bitpanda,nansen,faire,"
     "wallapop,gigs,contentful,typeform,planetscale,"
+    # EU/EMEA-focused (live-verified 2026-06-07; hire product in EU/EMEA)
+    "monzo,sumup,getyourguide,doctolib,celonis,wolt,n26,hellofresh,trustpilot,"
     # tier-1
     "stripe,datadog,mongodb,canonical,cloudflare,figma,gitlab,elastic,postman,"
     "vercel,discord,mozilla,mattermost,remote",
@@ -81,7 +83,7 @@ ASHBY_BOARDS = _csv_list(
     "ASHBY_BOARDS",
     # tier-2/3
     "pleo,mollie,pennylane,sardine,taktile,swan,ramp,ledger,blockdaemon,safe,"
-    "paxos,backmarket,gorgias,posthog,workos,"
+    "paxos,backmarket,gorgias,posthog,workos,fonoa,"
     # tier-1
     "notion,1password,clickup,deel,n8n,linear,zapier,supabase,buffer",
 )
