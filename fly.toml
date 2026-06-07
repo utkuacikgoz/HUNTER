@@ -22,8 +22,8 @@
 # falls back to the defaults in config/settings.py. See .env.example for the
 # full list of overridable keys.
 # ────────────────────────────────────────────────────────────────────────────
-app = "hunter-bot"
-primary_region = "ams"
+app = "hunter-whjqdw"
+primary_region = "iad"
 
 [build]
   dockerfile = "Dockerfile"
