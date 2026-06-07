@@ -20,6 +20,8 @@ LINKEDIN_SESSION_COOKIE = os.getenv("LINKEDIN_SESSION_COOKIE", "")
 
 # --- Anthropic Claude ---
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+# Model used for cover letters, form answers, and sponsor scoring. Override via env.
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 
 # --- Job preferences ---
 TARGET_ROLE = os.getenv("TARGET_ROLE", "Senior Product Manager")

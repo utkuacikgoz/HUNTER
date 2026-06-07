@@ -1,0 +1,112 @@
+# CLAUDE.md
+
+Guidance for working in this repository.
+
+## What HUNTER is
+
+A personal job-hunting automation tool (Python 3.12, asyncio). It scrapes Product
+Manager roles from several sources, filters them by region / remote / visa-sponsor
+signals, pushes candidates to a Telegram bot for human review, then auto-applies to
+approved jobs with Playwright and Claude-generated cover letters. State lives in a
+local SQLite DB.
+
+Pipeline: **scrape → filter/classify → store → Telegram review → apply → track/follow-up**
+
+## Layout
+
+- [main.py](main.py) — CLI entry point and orchestrator. Subcommands: `hunt`, `apply`,
+  `followup`, `stats`, `bot`, `backup`. `bot` runs the Telegram bot plus an APScheduler
+  cron (daily hunt, follow-up, DB backup, screenshot prune) with graceful shutdown.
+- [config/settings.py](config/settings.py) — **all configuration**, read from env via
+  `python-dotenv`. Also `validate_config(command)` which gates each subcommand on its
+  required vars. See "Environment / config" below.
+- [scraper/](scraper/) — job sources.
+  - [base.py](scraper/base.py): `JobSource` contract; `BrowserSource` (Playwright/Chromium)
+    and `ApiSource` (aiohttp JSON, no browser). `BaseScraper` is an alias of `BrowserSource`.
+  - Browser scrapers: [wellfound.py](scraper/wellfound.py), [remoteok.py](scraper/remoteok.py),
+    [linkedin.py](scraper/linkedin.py) (disabled — session-cookie issues, kept for Phase 3).
+  - [ats.py](scraper/ats.py): Greenhouse / Lever / Ashby API catalog sources.
+  - [filters.py](scraper/filters.py): `evaluate_job_async` → verdict `include` / `flag` / `drop`.
+- [tracker/database.py](tracker/database.py) — SQLite access. Auto-migrates by adding
+  missing columns; WAL mode. DB at `hunter.db` (override with `DB_PATH`).
+- [prompts/generator.py](prompts/generator.py) — Claude cover-letter / answer generation
+  (model `claude-sonnet-4-20250514`). Falls back to a template if `ANTHROPIC_API_KEY` is unset.
+- [applicant/engine.py](applicant/engine.py) — Playwright auto-apply engine.
+- [telegram_bot/bot.py](telegram_bot/bot.py) — Telegram review UI and apply worker queue.
+- [tests/](tests/) — pytest suite (asyncio auto mode).
+
+## Environment / config
+
+All settings are environment variables. There are three layers, in override order:
+
+1. **Defaults** — [config/settings.py](config/settings.py). Single source of truth for
+   every var and the long lists (sponsor companies, ATS boards, search queries). Don't
+   read `os.getenv` elsewhere; add a setting here and import it.
+2. **Non-secret config** — committed. Local: `.env`. Production: `[env]` in
+   [fly.toml](fly.toml). Only set a key to override a default.
+3. **Secrets + PII** — never committed. Local: `.env` (gitignored). Production:
+   `fly secrets set ...` (see the documented command in [fly.toml](fly.toml)).
+
+[.env.example](.env.example) is the template, split into SECRETS vs CONFIG sections that
+mirror this split. Local dev uses one `.env` for both; production splits them across
+`fly secrets` and `fly.toml [env]`.
+
+```
+cp .env.example .env    # local dev
+```
+
+`validate_config(command)` in settings.py defines what each subcommand *requires* vs. warns on.
+
+**Secrets** (→ `fly secrets`): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ANTHROPIC_API_KEY`,
+`RESUME_TEXT`, all `APPLICANT_*` PII, and optional `LINKEDIN_SESSION_COOKIE` / `INDEED_API_KEY`.
+Everything else is non-secret config.
+
+Required vars by command (from `validate_config`):
+
+| Command | Hard requirement | Warns if missing |
+|---|---|---|
+| `hunt`, `bot`, `review` | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | `LINKEDIN_SESSION_COOKIE` |
+| `apply`, `bot` | `config/resume.txt` or `RESUME_TEXT` | `ANTHROPIC_API_KEY`, `LINKEDIN_SESSION_COOKIE` |
+| `stats`, `backup`, `followup` | none (DB-only / local) | — |
+
+`stats`, `backup`, and `followup` run with no credentials, so use them to smoke-test.
+Resume text is read from `config/resume.txt` (preferred) or the `RESUME_TEXT` env var.
+
+## Setup & common commands
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+.venv/bin/playwright install chromium        # needed for scrape/apply paths
+
+.venv/bin/python main.py stats               # DB-only, safe smoke test
+.venv/bin/python main.py hunt                # scrape + push to Telegram (needs creds)
+```
+
+Quality gates (mirror CI in [.github/workflows/ci.yml](.github/workflows/ci.yml)):
+
+```bash
+.venv/bin/python -m pytest -q     # 168 tests
+.venv/bin/ruff check .            # lint
+.venv/bin/mypy                    # type check (files configured in pyproject.toml)
+```
+
+CI installs from [requirements.lock](requirements.lock) and runs lint → mypy → pytest on
+Python 3.12. `coverage fail_under = 40` is a regression ratchet, not a target (I/O-heavy
+paths can't be unit-tested without live services).
+
+## Conventions
+
+- Python 3.12 target; ruff line-length 110 (E501 ignored). Type-checked with mypy
+  (`telegram_bot.bot` relaxes two telegram-Optional noise codes — see pyproject.toml).
+- Config is centralized in `config/settings.py`; don't read `os.getenv` elsewhere — add a
+  setting there and import it.
+- New job sources subclass `ApiSource` (preferred, no browser) or `BrowserSource`.
+- External/untrusted text (job descriptions) is sanitized before going into LLM prompts —
+  see `_sanitize_external_text` in [prompts/generator.py](prompts/generator.py).
+- Commit messages in this repo end with a `Co-Authored-By` trailer for Claude.
+
+## Planning docs
+
+[IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md) and [PHASE_2_PLAN.md](PHASE_2_PLAN.md) track the
+roadmap. LinkedIn scraping/apply is deferred to "Phase 3".

@@ -1,0 +1,48 @@
+# fly.toml — HUNTER job-hunting bot.
+#
+# This app is a single long-running worker (Telegram long-poll bot + APScheduler
+# cron). It has NO HTTP server, so there is no [http_service] / ports section.
+# State is SQLite on a persistent volume, so it must run as exactly ONE machine
+# that never auto-stops — do not scale it past 1.
+#
+# ── Environment-variable architecture ───────────────────────────────────────
+# SECRETS (credentials + PII) → `fly secrets set`, encrypted, NEVER in this file:
+#
+#   fly secrets set \
+#     TELEGRAM_BOT_TOKEN=... \
+#     TELEGRAM_CHAT_ID=... \
+#     ANTHROPIC_API_KEY=sk-ant-... \
+#     RESUME_TEXT="$(cat config/resume.txt)" \
+#     APPLICANT_NAME="..." APPLICANT_FIRST_NAME="..." APPLICANT_LAST_NAME="..." \
+#     APPLICANT_EMAIL="..." APPLICANT_PHONE="..." \
+#     APPLICANT_LINKEDIN="..." APPLICANT_WEBSITE="..."
+#     # optional: LINKEDIN_SESSION_COOKIE=...  INDEED_API_KEY=...
+#
+# NON-SECRET CONFIG → the [env] block below (committed). Anything not set here
+# falls back to the defaults in config/settings.py. See .env.example for the
+# full list of overridable keys.
+# ────────────────────────────────────────────────────────────────────────────
+app = "hunter-bot"
+primary_region = "ams"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  # Point the DB at the mounted volume so it survives deploys/restarts.
+  DB_PATH = "/data/hunter.db"
+  LOG_LEVEL = "INFO"
+  CLAUDE_MODEL = "claude-sonnet-4-6"
+  # Add any other non-secret overrides here, e.g.:
+  #   MAX_JOBS_PER_DAY = "50"
+  #   ENABLE_LLM_SPONSOR_SCORING = "false"
+
+# Persistent volume for the SQLite database.
+[[mounts]]
+  source = "hunter_data"
+  destination = "/data"
+
+# Playwright/Chromium is memory-hungry; 1GB is the practical floor.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"
