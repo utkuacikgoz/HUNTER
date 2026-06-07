@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 
 from applicant.engine import apply_to_approved_jobs
+from config.log_redaction import install_redaction
 from config.settings import (
     BASE_DIR,
     DB_BACKUP_DIR,
@@ -67,10 +68,10 @@ logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     handlers=[_stream_handler, _file_handler],
 )
-# httpx logs every request URL at INFO — and the Telegram API URL embeds the bot
-# token (.../bot<TOKEN>/getUpdates). Quiet it to WARNING so the token never lands
-# in logs.
-logging.getLogger("httpx").setLevel(logging.WARNING)
+# Defense-in-depth: scrub secret-shaped strings (Telegram token, API keys, li_at)
+# from EVERY log record on our handlers, and quiet chatty libraries (httpx/telegram
+# log request URLs that embed the bot token). See config/log_redaction.py.
+install_redaction(logging.getLogger(), quiet_chatty=True)
 logger = logging.getLogger("hunter")
 
 
