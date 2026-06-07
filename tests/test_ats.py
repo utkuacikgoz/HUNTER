@@ -1,9 +1,11 @@
-"""Tests for scraper/ats.py — Greenhouse/Lever/Ashby parsing, role filtering, normalization."""
+"""Tests for scraper/ats.py — ATS parsing, role filtering, normalization."""
 from scraper.ats import (
     AshbySource,
     AtsSource,
     GreenhouseSource,
     LeverSource,
+    RecruiteeSource,
+    SmartRecruitersSource,
     _strip_html,
 )
 from scraper.base import ApiSource
@@ -130,3 +132,73 @@ class TestAshby:
         assert jobs[0]["title"] == "Principal Product Manager"
         assert jobs[0]["platform"] == "ashby"
         assert jobs[0]["url"] == "https://jobs.ashbyhq.com/acme/1"
+
+
+class TestRecruitee:
+    async def test_parses_filters_normalizes(self, monkeypatch):
+        src = RecruiteeSource(boards=["acme"])
+        payload = {"offers": [
+            {"title": "Senior Product Manager", "location": "Amsterdam, Netherlands",
+             "careers_url": "https://acme.recruitee.com/o/spm", "description": "<p>Own it</p>"},
+            {"title": "AML Analyst", "location": "Bucharest, Romania",
+             "careers_url": "https://acme.recruitee.com/o/aml"},
+        ]}
+        _patch_get_json(monkeypatch, src, payload)
+
+        jobs = await src.scrape()
+        assert [j["title"] for j in jobs] == ["Senior Product Manager"]
+        assert jobs[0]["platform"] == "recruitee"
+        assert jobs[0]["company"] == "acme"
+        assert jobs[0]["url"] == "https://acme.recruitee.com/o/spm"
+        assert jobs[0]["location"] == "Amsterdam, Netherlands"
+        assert jobs[0]["description"] == "Own it"  # html stripped
+
+    async def test_location_falls_back_to_city_country(self, monkeypatch):
+        src = RecruiteeSource(boards=["acme"])
+        payload = {"offers": [
+            {"title": "Product Manager", "city": "Berlin", "country": "Germany",
+             "careers_url": "https://acme.recruitee.com/o/pm"},
+        ]}
+        _patch_get_json(monkeypatch, src, payload)
+        jobs = await src.scrape()
+        assert jobs[0]["location"] == "Berlin, Germany"
+
+
+class TestSmartRecruiters:
+    async def test_parses_filters_builds_public_url(self, monkeypatch):
+        src = SmartRecruitersSource(boards=["Acme"])
+        payload = {"content": [
+            {"name": "Product Manager", "id": "123",
+             "location": {"city": "Paris", "country": "fr", "remote": False,
+                          "fullLocation": "Paris, France"}},
+            {"name": "Sales Lead", "id": "456",
+             "location": {"city": "NYC", "country": "us"}},
+        ]}
+        _patch_get_json(monkeypatch, src, payload)
+
+        jobs = await src.scrape()
+        assert [j["title"] for j in jobs] == ["Product Manager"]
+        assert jobs[0]["platform"] == "smartrecruiters"
+        assert jobs[0]["url"] == "https://jobs.smartrecruiters.com/Acme/123"
+        assert jobs[0]["location"] == "Paris, France"
+
+    async def test_remote_flag_prefixes_location(self, monkeypatch):
+        src = SmartRecruitersSource(boards=["Acme"])
+        payload = {"content": [
+            {"name": "Senior Product Manager", "id": "789",
+             "location": {"city": "London", "country": "uk", "remote": True,
+                          "fullLocation": "London, UK"}},
+        ]}
+        _patch_get_json(monkeypatch, src, payload)
+        jobs = await src.scrape()
+        assert jobs[0]["location"] == "Remote - London, UK"
+
+    async def test_id_falls_back_to_ref_tail(self, monkeypatch):
+        src = SmartRecruitersSource(boards=["Acme"])
+        payload = {"content": [
+            {"name": "Product Lead", "location": {"fullLocation": "Berlin"},
+             "ref": "https://api.smartrecruiters.com/v1/companies/Acme/postings/999"},
+        ]}
+        _patch_get_json(monkeypatch, src, payload)
+        jobs = await src.scrape()
+        assert jobs[0]["url"] == "https://jobs.smartrecruiters.com/Acme/999"
