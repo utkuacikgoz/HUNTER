@@ -67,6 +67,10 @@ logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     handlers=[_stream_handler, _file_handler],
 )
+# httpx logs every request URL at INFO — and the Telegram API URL embeds the bot
+# token (.../bot<TOKEN>/getUpdates). Quiet it to WARNING so the token never lands
+# in logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("hunter")
 
 

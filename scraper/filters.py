@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from config.settings import (
+    CANDIDATE_WORK_REGIONS,
     REGION_ALLOWLIST,
     REMOTE_REQUIRED,
     SPONSOR_BLOCKLIST_COMPANIES,
@@ -72,6 +73,10 @@ _US_STATE_HINTS = {
     "chicago", "denver", "los angeles", "nyc",
 }
 _REMOTE_TOKENS = {"remote", "work from home", "wfh", "anywhere", "distributed", "fully remote"}
+_CANADA_TOKENS = {"canada", "toronto", "vancouver", "montreal", "ontario", "quebec"}
+# Tokens that signal a remote role is open beyond a single country — so a US/Canada
+# mention alongside one of these is NOT a residence lock.
+_GLOBAL_REMOTE_TOKENS = {"worldwide", "anywhere", "global", "globally", "any country", "any location"}
 
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
@@ -117,6 +122,32 @@ def detect_us_only_blocker(job: dict) -> str | None:
 def detect_remote(job: dict) -> bool:
     hay = _haystack(job)
     return any(token in hay for token in _REMOTE_TOKENS)
+
+
+def detect_country_locked_remote(job: dict) -> str | None:
+    """A remote role whose *location* is restricted to the US and/or Canada, with
+    no EU/EMEA or global scope. Such roles require residence / work authorization
+    there, so they won't accept an overseas (EMEA-based) candidate — even at a
+    sponsor-friendly company.
+
+    Returns the location text when locked, else None. Checks the structured
+    location field only; description prose ("our US team") is too noisy.
+    """
+    nloc = _normalize(job.get("location"))
+    if not _has(nloc, _REMOTE_TOKENS):
+        return None
+    locked_to_us_ca = (
+        _has(nloc, _US_TOKENS)
+        or _has(nloc, _US_LOC_ONLY)
+        or _has(nloc, _US_STATE_HINTS)
+        or _has(nloc, _CANADA_TOKENS)
+    )
+    if not locked_to_us_ca:
+        return None
+    # Also opens to the candidate's regions or is explicitly global → not a lock.
+    if _has(nloc, _GLOBAL_REMOTE_TOKENS) or _has(nloc, _EU_TOKENS) or _has(nloc, _EMEA_TOKENS):
+        return None
+    return (job.get("location") or "").strip()
 
 
 def classify_region(job: dict) -> Region:
@@ -230,6 +261,20 @@ def _evaluate_sync(job: dict) -> JobVerdict:
             verdict="drop",
             reasons=["not marked remote"],
         )
+
+    # Remote role locked to US/Canada (where the candidate can't work) -> drop.
+    # Takes precedence over the sponsor allowlist: a US-locked posting won't take
+    # an overseas candidate regardless of how visa-friendly the company is.
+    if is_remote and CANDIDATE_WORK_REGIONS and "us" not in CANDIDATE_WORK_REGIONS:
+        locked = detect_country_locked_remote(job)
+        if locked:
+            return JobVerdict(
+                region=classify_region(job),
+                is_remote=True,
+                sponsor_status=sponsor,
+                verdict="drop",
+                reasons=[f"remote locked to US/Canada (candidate is overseas): {locked!r}"],
+            )
 
     region = classify_region(job)
     if region == "other":

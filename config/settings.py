@@ -20,6 +20,8 @@ LINKEDIN_SESSION_COOKIE = os.getenv("LINKEDIN_SESSION_COOKIE", "")
 
 # --- Anthropic Claude ---
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+# Model used for cover letters, form answers, and sponsor scoring. Override via env.
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 
 # --- Job preferences ---
 TARGET_ROLE = os.getenv("TARGET_ROLE", "Senior Product Manager")
@@ -43,6 +45,11 @@ def _csv_list(env_name: str, default: str) -> list[str]:
 # --- Region / sponsor filtering ---
 REGION_ALLOWLIST = _csv_set("REGION_ALLOWLIST", "us,eu,emea")
 REMOTE_REQUIRED = os.getenv("REMOTE_REQUIRED", "true").strip().lower() in {"1", "true", "yes", "y"}
+# Regions where the candidate can actually work (no sponsorship/relocation needed).
+# A remote role explicitly LOCKED to countries outside these regions (e.g.
+# "Remote - US only", "100% Remote (US/Canada)") is dropped — it won't accept an
+# overseas candidate even at a sponsor-friendly company. Empty disables the check.
+CANDIDATE_WORK_REGIONS = _csv_set("CANDIDATE_WORK_REGIONS", "emea,eu")
 SPONSOR_FRIENDLY_COMPANIES = _csv_set(
     "SPONSOR_FRIENDLY_COMPANIES",
     "Stripe,GitLab,Automattic,Spotify,Klarna,Wise,Remote,Deel,Toptal,Doist,Buffer,Zapier,"
@@ -65,6 +72,8 @@ GREENHOUSE_BOARDS = _csv_list(
     # tier-2/3 (fintech / crypto / marketplace / saas)
     "gocardless,form3,tide,truelayer,mercury,fireblocks,bitpanda,nansen,faire,"
     "wallapop,gigs,contentful,typeform,planetscale,"
+    # EU/EMEA-focused (live-verified 2026-06-07; hire product in EU/EMEA)
+    "monzo,sumup,getyourguide,doctolib,celonis,wolt,n26,hellofresh,trustpilot,"
     # tier-1
     "stripe,datadog,mongodb,canonical,cloudflare,figma,gitlab,elastic,postman,"
     "vercel,discord,mozilla,mattermost,remote",
@@ -74,7 +83,7 @@ ASHBY_BOARDS = _csv_list(
     "ASHBY_BOARDS",
     # tier-2/3
     "pleo,mollie,pennylane,sardine,taktile,swan,ramp,ledger,blockdaemon,safe,"
-    "paxos,backmarket,gorgias,posthog,workos,"
+    "paxos,backmarket,gorgias,posthog,workos,fonoa,"
     # tier-1
     "notion,1password,clickup,deel,n8n,linear,zapier,supabase,buffer",
 )
