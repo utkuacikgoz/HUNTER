@@ -19,8 +19,10 @@ from tracker.database import (
     approve_job,
     get_all_applied_jobs,
     get_filter_precision,
+    get_funnel,
     get_job_by_id,
     get_jobs_needing_followup,
+    get_last_scrape_time,
     get_stats,
     log_action,
     record_followup,
@@ -235,6 +237,21 @@ async def send_stats_message() -> None:
     )
 
 
+async def send_telegram_alert(text: str) -> None:
+    """Send a plain operational alert / heartbeat to the configured chat.
+
+    Used by the scheduler (missed-run / zero-yield) and apply worker. Never
+    raises — alerting must not crash the caller.
+    """
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.warning("Telegram not configured; alert dropped: %s", text)
+        return
+    try:
+        await Bot(token=TELEGRAM_BOT_TOKEN).send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
+    except Exception as e:
+        logger.warning(f"Failed to send alert: {e}")
+
+
 # === Bot command handlers (when running as persistent bot) ===
 
 def _is_authorized(update: Update) -> bool:
@@ -291,6 +308,39 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{_format_filter_precision(precision)}"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
+
+
+def _format_report() -> str:
+    """Build the end-to-end funnel report (scrape -> filter -> review -> apply)."""
+    f = get_funnel()
+    v = f["verdicts"]
+    s = f["statuses"]
+    last = get_last_scrape_time() or "never"
+    scraped = sum(v.values())
+    return (
+        f"📈 *HUNTER FUNNEL*\n\n"
+        f"Last scrape: {last}\n\n"
+        f"*Sourced* ({scraped} total):\n"
+        f"  ✅ include: {v.get('include', 0)}\n"
+        f"  🟡 flag: {v.get('flag', 0)}\n"
+        f"  ❌ drop: {v.get('drop', 0)}\n\n"
+        f"*Pipeline:*\n"
+        f"  ⏳ pending: {s.get('pending', 0)}\n"
+        f"  👍 approved: {s.get('approved', 0)}\n"
+        f"  📨 applied: {s.get('applied', 0)}\n"
+        f"  🎤 interviewing: {s.get('interviewing', 0)}\n"
+        f"  🎉 offered: {s.get('offered', 0)}\n\n"
+        f"*Apply outcomes (logged):*\n"
+        f"  confirmed: {f['apply_confirmed']} | failed: {f['apply_failed']}\n\n"
+        f"*Filter approve-rate by verdict:*\n"
+        f"{_format_filter_precision(get_filter_precision())}"
+    )
+
+
+async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_authorized(update):
+        return
+    await update.message.reply_text(_format_report(), parse_mode="Markdown")
 
 
 async def cmd_applied(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -561,6 +611,7 @@ def build_bot_app() -> Application:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).defaults(defaults).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CommandHandler("applied", cmd_applied))
     app.add_handler(CommandHandler("followups", cmd_followups))
     app.add_handler(CallbackQueryHandler(callback_handler))

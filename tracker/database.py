@@ -389,3 +389,46 @@ def job_url_exists(url):
         return row is not None
     finally:
         conn.close()
+
+
+def get_last_scrape_time() -> str | None:
+    """ISO timestamp of the most recent scraper run, or None if never run.
+
+    Used by the boot catch-up watchdog to decide whether a hunt was missed
+    while the worker was down.
+    """
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT MAX(ran_at) AS t FROM scraper_health").fetchone()
+        return row["t"] if row and row["t"] else None
+    finally:
+        conn.close()
+
+
+def get_funnel() -> dict:
+    """End-to-end funnel counts for the /report command and alerting.
+
+    Returns scraped-job counts by filter verdict, status distribution, and
+    confirmed/failed apply counts from the application log.
+    """
+    conn = get_connection()
+    try:
+        vrows = conn.execute(
+            "SELECT COALESCE(filter_verdict, 'unknown') AS v, COUNT(*) AS c FROM jobs GROUP BY v"
+        ).fetchall()
+        srows = conn.execute(
+            "SELECT status, COUNT(*) AS c FROM jobs GROUP BY status"
+        ).fetchall()
+        arows = conn.execute(
+            "SELECT action, COUNT(*) AS c FROM application_log "
+            "WHERE action IN ('applied', 'apply_failed') GROUP BY action"
+        ).fetchall()
+        actions = {r["action"]: r["c"] for r in arows}
+        return {
+            "verdicts": {r["v"]: r["c"] for r in vrows},
+            "statuses": {r["status"]: r["c"] for r in srows},
+            "apply_confirmed": actions.get("applied", 0),
+            "apply_failed": actions.get("apply_failed", 0),
+        }
+    finally:
+        conn.close()
