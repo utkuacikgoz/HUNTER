@@ -22,13 +22,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.lock
           pip install pytest==8.3.4 pytest-asyncio==0.25.0 pytest-cov==6.0.0 \
-            ruff==0.8.4 mypy==1.13.0 types-pytz==2024.2.0.20241003
+            ruff==0.8.4 mypy==1.13.0 pip-audit==2.10.0 types-pytz==2026.2.0.20260518
 
       - name: Lint
         run: ruff check .
 
       - name: Type check
         run: mypy
+
+      - name: Dependency audit (CVEs)
+        run: pip-audit -r requirements.lock
 
       - name: Test
         run: pytest -q --cov=. --cov-report=term-missing
