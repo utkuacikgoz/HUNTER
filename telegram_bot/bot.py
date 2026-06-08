@@ -419,11 +419,11 @@ async def shutdown_apply_worker(timeout: float = 60.0) -> None:
 def _format_apply_result(result, job: dict) -> str:
     """Build the Telegram status message for a finished apply attempt.
 
-    Distinguishes ``form_filled`` \u2014 where the bot already pre-filled the
-    candidate's details and cover letter, so the user only has to review and
-    submit \u2014 from cases where nothing was filled (no form / external site).
-    Always surfaces the job URL so the next step is one tap away, instead of a
-    blanket "NEEDS MANUAL APPLY" that makes a useful pre-fill look like a failure.
+    Honest about reality: only ``success`` means the bot actually submitted and
+    saw a confirmation. Everything else is a MANUAL apply \u2014 the bot fills the
+    form in its own server-side browser, which the user's browser can't see, so
+    we never tell them a link is "pre-filled". The tailored cover letter is sent
+    separately for copy/paste (see _auto_apply).
     """
     header = f"{job.get('title', '')} @ {job.get('company', '')}"
     url = job.get("url", "")
@@ -432,25 +432,19 @@ def _format_apply_result(result, job: dict) -> str:
         return f"\u21a9\ufe0f *ALREADY APPLIED*\n{header}\n_{result.message}_"
 
     if result.success:
-        return f"\u2705 *APPLIED* (Easy Apply)\n{header}\n_{result.message}_"
+        return f"\u2705 *APPLIED & CONFIRMED*\n{header}\n_{result.message}_"
 
-    if result.method == "form_filled":
-        return (
-            "\u270d\ufe0f *FORM PRE-FILLED \u2014 review & submit*\n"
-            f"{header}\n"
-            "Your details and cover letter are filled in. Open the page, "
-            "double-check, and hit submit:\n"
-            f"{url}"
-        )
-
-    if result.method in ("screenshot_only", "external_redirect"):
-        reason = {
-            "screenshot_only": "No apply form detected \u2014 apply manually.",
-            "external_redirect": "Application is on an external site \u2014 apply manually.",
-        }[result.method]
-        return f"\u26a0\ufe0f *NEEDS MANUAL APPLY*\n{header}\n_{reason}_\n{url}"
-
-    return f"\u274c *APPLY FAILED*\n{header}\n_{result.message}_"
+    # Non-success: the bot could not submit for you (this ATS needs a manual
+    # submit, the submit wasn't confirmed, or APPLY_DRY_RUN is on). The link opens
+    # a BLANK form \u2014 the server-side fill doesn't transfer to your browser.
+    why = {
+        "form_filled": "I prepared this one but can't submit it for you here \u2014 apply manually (the link is a blank form).",
+        "screenshot_only": "No apply form I can drive \u2014 apply manually.",
+        "external_redirect": "Application is on an external site \u2014 apply manually.",
+    }.get(result.method)
+    if why is None:
+        return f"\u274c *APPLY FAILED*\n{header}\n_{result.message}_"
+    return f"\U0001f4dd *APPLY MANUALLY*\n{header}\n_{why}_\n{url}"
 
 
 async def _auto_apply(query, job_id: int, job: dict):
@@ -471,6 +465,21 @@ async def _auto_apply(query, job_id: int, job: dict):
         await query.edit_message_text(text=text, parse_mode="Markdown")
     except Exception:
         logger.debug(f"Could not update message for job {job_id}")
+
+    # For a manual apply, hand over the tailored cover letter as a separate
+    # PLAIN-TEXT message (no Markdown, so it can't break formatting) for copy/paste.
+    if result and not result.success and result.method != "already_applied":
+        try:
+            fresh = get_job_by_id(job_id)
+            cover_letter = (fresh or {}).get("cover_letter") or ""
+            if cover_letter:
+                bot = Bot(token=TELEGRAM_BOT_TOKEN)
+                await bot.send_message(
+                    chat_id=TELEGRAM_CHAT_ID,
+                    text=f"📄 Cover letter for {job['title']} @ {job['company']} (copy/paste):\n\n{cover_letter}",
+                )
+        except Exception as e:
+            logger.debug(f"Could not send cover letter for job {job_id}: {e}")
 
     # Send screenshot as proof
     if result and result.screenshot_path and os.path.exists(result.screenshot_path):

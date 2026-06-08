@@ -1,6 +1,32 @@
 """Tests for prompts/generator.py — sanitization and fallback logic."""
 
 
+class TestIsAnswerableQuestion:
+    def setup_method(self):
+        from prompts.generator import is_answerable_question
+        self.ok = is_answerable_question
+
+    def test_real_question(self):
+        assert self.ok("What is the greatest impact you've had in a prior role?") is True
+
+    def test_lever_template_tag_rejected(self):
+        assert self.ok("<<<cards[fe90817b-8fda-4146][field1]>>>") is False
+
+    def test_bracket_field_name_rejected(self):
+        assert self.ok("cards[abc][field1]") is False
+
+    def test_too_short_rejected(self):
+        assert self.ok("Why?") is False
+
+    def test_empty_rejected(self):
+        assert self.ok("") is False
+        assert self.ok(None) is False  # type: ignore[arg-type]
+
+    def test_generate_form_answer_skips_placeholder(self):
+        from prompts.generator import generate_form_answer
+        # No API call is made; a placeholder yields an empty answer.
+        assert generate_form_answer("<<<cards[x][field1]>>>") == ""
+
 
 class TestSanitizeExternalText:
     def setup_method(self):

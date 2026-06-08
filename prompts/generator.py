@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 
 import anthropic
 
@@ -81,8 +82,31 @@ INSTRUCTIONS:
         return _fallback_cover_letter(job_title, company)
 
 
+_PLACEHOLDER_QUESTION = re.compile(r"<<<|>>>|cards\[|\[field|\{\{|\}\}|\$\{|%7B")
+
+
+def is_answerable_question(question: str) -> bool:
+    """True only for a real, human-readable free-text question.
+
+    Guards against feeding the LLM a raw ATS template tag (e.g. Lever's
+    ``cards[uuid][field1]``) or an empty/garbled label — which previously made
+    the model "answer" by complaining about the placeholder. Better to leave a
+    field blank (form won't submit -> manual) than to send nonsense to employers.
+    """
+    q = (question or "").strip()
+    if len(q) < 12 or len(q.split()) < 3:
+        return False
+    if _PLACEHOLDER_QUESTION.search(q):
+        return False
+    return any(ch.isalpha() for ch in q)
+
+
 def generate_form_answer(question: str, job_title: str = "", company: str = "") -> str:
-    """Generate an answer for a job application form question."""
+    """Generate an answer for a job application form question, or "" if the
+    question text isn't a real, answerable prompt."""
+    if not is_answerable_question(question):
+        logger.info(f"Skipping non-answerable form question: {question[:60]!r}")
+        return ""
     try:
         c = _get_client()
         safe_question = _sanitize_external_text(question, max_len=500)

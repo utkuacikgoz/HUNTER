@@ -49,7 +49,7 @@ class TestApplyQueueSerialization:
 
 class TestFormFilledHandling:
     """form_filled is unconfirmed → must never report 'applied'; it should
-    surface as an actionable 'review & submit' prompt with the job URL."""
+    surface as an honest manual-apply prompt with the job URL."""
 
     async def test_form_filled_prompts_review_not_applied(self, monkeypatch):
         import telegram_bot.bot as bot
@@ -65,10 +65,10 @@ class TestFormFilledHandling:
         job = {"id": 1, "title": "PM", "company": "Acme", "url": "https://example.com/job"}
         await bot._auto_apply(q, 1, job)
 
-        # Critical invariant: an unconfirmed pre-fill is never a success.
-        assert not any("*APPLIED*" in t for t in q.texts)
-        # New UX: legible, actionable, and includes the URL to finish in-browser.
-        assert any("PRE-FILLED" in t and job["url"] in t for t in q.texts)
+        # Critical invariant: an unconfirmed fill is never a success.
+        assert not any("CONFIRMED" in t for t in q.texts)
+        # Honest UX: a manual-apply prompt with the URL (the link is a blank form).
+        assert any("APPLY MANUALLY" in t and job["url"] in t for t in q.texts)
 
 
 class TestPruneScreenshots:
