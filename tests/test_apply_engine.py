@@ -156,6 +156,47 @@ class TestSelectTarget:
         assert self.app._select_target("Favourite colour") is None
 
 
+class FakeRadioPage:
+    def __init__(self, groups):
+        self._groups = groups
+        self.clicked = []
+
+    async def evaluate(self, script):
+        return self._groups
+
+    async def click(self, sel):
+        self.clicked.append(sel)
+
+
+class TestFillRadios:
+    """Ashby uses radio groups for visa/EEO questions — pick the right option."""
+
+    async def test_picks_correct_radio_per_question(self):
+        app = AutoApplicant()
+        groups = {
+            "g1": {"question": "Will you require visa sponsorship?",
+                   "options": [{"id": "y1", "label": "Yes"}, {"id": "n1", "label": "No"}]},
+            "g2": {"question": "Are you authorized to work without sponsorship?",
+                   "options": [{"id": "y2", "label": "Yes"}, {"id": "n2", "label": "No"}]},
+            "g3": {"question": "Gender",
+                   "options": [{"id": "m", "label": "Male"},
+                               {"id": "d", "label": "Decline to self-identify"}]},
+        }
+        page = FakeRadioPage(groups)
+        await app._fill_radios(page)
+        assert 'label[for="y1"]' in page.clicked   # sponsorship -> Yes
+        assert 'label[for="n2"]' in page.clicked    # authorized-without-sponsorship -> No
+        assert 'label[for="d"]' in page.clicked     # gender -> Decline
+        assert 'label[for="y2"]' not in page.clicked  # didn't wrongly pick Yes for auth
+
+    async def test_unknown_question_skipped(self):
+        app = AutoApplicant()
+        page = FakeRadioPage({"g": {"question": "Pineapple on pizza?",
+                                    "options": [{"id": "y", "label": "Yes"}]}})
+        await app._fill_radios(page)
+        assert page.clicked == []
+
+
 class TestApplyCap:
     async def test_caps_per_run_and_buckets_manual(self, monkeypatch):
         import applicant.engine as eng
