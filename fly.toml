@@ -31,6 +31,8 @@ primary_region = "iad"
 [env]
   # Point the DB at the mounted volume so it survives deploys/restarts.
   DB_PATH = "/data/hunter.db"
+  # Résumé PDF lives on the persistent volume (uploaded out-of-band, off git).
+  RESUME_PATH = "/data/resume.pdf"
   LOG_LEVEL = "INFO"
   CLAUDE_MODEL = "claude-sonnet-4-6"
   # Let Claude resolve "unknown sponsor" jobs into include/drop (small API cost

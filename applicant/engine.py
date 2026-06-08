@@ -95,7 +95,13 @@ class AutoApplicant:
             elif platform == "lever":
                 result = await self._apply_lever(job, cover_letter)
             else:
-                result = await self._apply_generic(job, cover_letter)
+                # ATSes we can't drive reliably (Ashby/Recruitee/SmartRecruiters):
+                # skip the browser entirely and hand off a fast manual apply — the
+                # cover letter is already generated and sent for copy/paste.
+                result = ApplyResult(
+                    success=False, method="manual_handoff",
+                    message="This ATS isn't auto-submittable — apply via the link (cover letter sent).",
+                )
 
             if result.success:
                 mark_applied(job_id)
@@ -406,6 +412,68 @@ class AutoApplicant:
             except Exception as e:
                 logger.debug(f"labeled question skipped: {e}")
 
+    def _select_target(self, label: str) -> str | None:
+        """Map a dropdown's question to the option keyword to pick, from the
+        candidate's known answers. Returns None to leave the select untouched."""
+        h = (label or "").lower()
+        if not h:
+            return None
+        # Check authorization BEFORE sponsorship: "authorized to work WITHOUT
+        # sponsorship?" mentions sponsorship but is really an authorization question
+        # (answer = work_authorized = No), distinct from "do you REQUIRE sponsorship?"
+        if "authori" in h or "eligible" in h or "legally" in h or "right to work" in h:
+            return "yes" if COMMON_ANSWERS["work_authorized"].lower().startswith("y") else "no"
+        if "sponsor" in h:  # "Will you require visa sponsorship?"
+            return "yes" if COMMON_ANSWERS["requires_sponsorship"].lower().startswith("y") else "no"
+        if any(w in h for w in ("gender", "race", "ethnic", "veteran", "disability",
+                                "hispanic", "latino", "identify")):
+            return "decline"
+        if "hear about" in h or "how did you" in h or "referr" in h or "source" in h:
+            return COMMON_ANSWERS["referral_source"].lower()
+        if any(w in h for w in ("remote", "work from home", "wfh")) or "relocat" in h:
+            return "yes"
+        return None
+
+    async def _fill_selects(self, page: Page) -> None:
+        """Answer native <select> dropdowns (work auth, sponsorship, EEO, source)
+        from the candidate's known answers. Custom div-comboboxes are skipped."""
+        for sel in await page.query_selector_all("select"):
+            try:
+                label = await sel.evaluate(
+                    """el => {
+                        let t = ''; const id = el.getAttribute('id');
+                        if (id) { const l = document.querySelector('label[for="'+id+'"]'); if (l) t = l.textContent; }
+                        if (!t) { const l = el.closest('div')?.querySelector('label'); if (l) t = l.textContent; }
+                        return (t || el.getAttribute('aria-label') || el.getAttribute('name') || '').trim();
+                    }"""
+                )
+                target = self._select_target(label)
+                if not target:
+                    continue
+                chosen = None
+                for opt in await sel.query_selector_all("option"):
+                    txt = ((await opt.inner_text()) or "").strip().lower()
+                    val = await opt.get_attribute("value")
+                    if not val or not txt:
+                        continue
+                    if target == "decline":
+                        if any(p in txt for p in ("decline", "prefer not", "wish not",
+                                                  "do not wish", "not to answer", "not to say")):
+                            chosen = val
+                            break
+                    elif target in ("yes", "no"):
+                        if txt == target or txt.startswith(target):
+                            chosen = val
+                            break
+                    elif target in txt:
+                        chosen = val
+                        break
+                if chosen is not None:
+                    await sel.select_option(chosen)
+                    await asyncio.sleep(0.2)
+            except Exception as e:
+                logger.debug(f"select fill skipped: {e}")
+
     async def _submit_and_confirm(
         self, page: Page, job: dict, platform: str, *,
         submit_selectors: list[str], confirm_selectors: list[str],
@@ -496,6 +564,7 @@ class AutoApplicant:
                        "textarea[aria-label*='cover' i]"], cover_letter,
             )
             await self._fill_labeled_questions(page, cover_letter)
+            await self._fill_selects(page)
             return await self._submit_and_confirm(
                 page, job, "greenhouse",
                 submit_selectors=["#submit_app", "button[type='submit']", "button:has-text('Submit')"],
@@ -533,6 +602,7 @@ class AutoApplicant:
             await self._upload_resume(page, ["input[name='resume']", "input[type='file']"])
             await self._set_first(page, ["textarea[name='comments']"], cover_letter)
             await self._fill_labeled_questions(page, cover_letter)
+            await self._fill_selects(page)
             return await self._submit_and_confirm(
                 page, job, "lever",
                 submit_selectors=["button[type='submit']", "button:has-text('Submit application')", "#btn-submit"],
