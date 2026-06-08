@@ -35,6 +35,7 @@ primary_region = "iad"
   RESUME_PATH = "/data/resume.pdf"
   LOG_LEVEL = "INFO"
   CLAUDE_MODEL = "claude-sonnet-4-6"
+  COVER_LETTER_MODEL = "claude-opus-4-8"
   # Let Claude resolve "unknown sponsor" jobs into include/drop (small API cost
   # per uncertain job; ANTHROPIC_API_KEY must be set as a secret).
   ENABLE_LLM_SPONSOR_SCORING = "true"

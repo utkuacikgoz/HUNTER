@@ -340,7 +340,7 @@ class AutoApplicant:
         return ""
 
     async def _resolve_field_value(
-        self, hint: str, cover_letter: str, *, is_freetext: bool
+        self, hint: str, cover_letter: str, *, is_freetext: bool, job: dict | None = None
     ) -> str:
         """Static COMMON_ANSWERS match first; for an unmatched free-text question
         fall back to an LLM-generated, cached answer (wires generate_form_answer)."""
@@ -352,8 +352,12 @@ class AutoApplicant:
             return ""
         if question in _ANSWER_CACHE:
             return _ANSWER_CACHE[question]
+        job = job or {}
         try:
-            answer = await asyncio.to_thread(generate_form_answer, question)
+            answer = await asyncio.to_thread(
+                generate_form_answer, question,
+                job.get("title", ""), job.get("company", ""),
+            )
         except Exception as e:
             logger.debug(f"LLM form answer failed for {question!r}: {e}")
             answer = ""
@@ -388,7 +392,7 @@ class AutoApplicant:
                 except Exception as e:
                     logger.debug(f"resume upload {sel} failed: {e}")
 
-    async def _fill_labeled_questions(self, page: Page, cover_letter: str) -> None:
+    async def _fill_labeled_questions(self, page: Page, cover_letter: str, job: dict | None = None) -> None:
         """Fill remaining labeled text fields / custom questions, using the LLM for
         free-text (textarea) questions that don't match a canned answer."""
         fields = await page.query_selector_all(
@@ -409,7 +413,7 @@ class AutoApplicant:
                 )
                 tag = await el.evaluate("el => el.tagName.toLowerCase()")
                 value = await self._resolve_field_value(
-                    label, cover_letter, is_freetext=(tag == "textarea")
+                    label, cover_letter, is_freetext=(tag == "textarea"), job=job
                 )
                 if value:
                     await el.fill(value)
@@ -568,7 +572,7 @@ class AutoApplicant:
                 page, ["#cover_letter_text", "textarea[name='cover_letter_text']",
                        "textarea[aria-label*='cover' i]"], cover_letter,
             )
-            await self._fill_labeled_questions(page, cover_letter)
+            await self._fill_labeled_questions(page, cover_letter, job)
             await self._fill_selects(page)
             return await self._submit_and_confirm(
                 page, job, "greenhouse",
@@ -606,7 +610,7 @@ class AutoApplicant:
             )
             await self._upload_resume(page, ["input[name='resume']", "input[type='file']"])
             await self._set_first(page, ["textarea[name='comments']"], cover_letter)
-            await self._fill_labeled_questions(page, cover_letter)
+            await self._fill_labeled_questions(page, cover_letter, job)
             await self._fill_selects(page)
             return await self._submit_and_confirm(
                 page, job, "lever",
