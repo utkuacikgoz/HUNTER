@@ -439,6 +439,7 @@ def _format_apply_result(result, job: dict) -> str:
     # a BLANK form \u2014 the server-side fill doesn't transfer to your browser.
     why = {
         "form_filled": "I prepared this one but can't submit it for you here \u2014 apply manually (the link is a blank form).",
+        "manual_handoff": "This ATS needs a manual submit \u2014 apply via the link (cover letter below).",
         "screenshot_only": "No apply form I can drive \u2014 apply manually.",
         "external_redirect": "Application is on an external site \u2014 apply manually.",
     }.get(result.method)
