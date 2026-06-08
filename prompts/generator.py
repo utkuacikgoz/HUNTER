@@ -250,6 +250,7 @@ COMMON_ANSWERS = {
     # structured ATS appliers. "yes"/"no" are matched against option text.
     "requires_sponsorship": os.getenv("ANSWER_REQUIRES_SPONSORSHIP", "yes"),
     "work_authorized": os.getenv("ANSWER_WORK_AUTHORIZED", "no"),
+    "location": os.getenv("ANSWER_LOCATION", "Istanbul, Turkey"),
     "demographic": os.getenv("ANSWER_DEMOGRAPHIC", "Decline to self-identify"),
     "referral_source": os.getenv("ANSWER_REFERRAL", "LinkedIn"),
     "linkedin": os.getenv("APPLICANT_LINKEDIN", ""),
