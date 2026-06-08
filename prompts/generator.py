@@ -224,6 +224,13 @@ COMMON_ANSWERS = {
     "work_authorization": os.getenv("ANSWER_WORK_AUTH", "Based in Turkey, authorized to work in EMEA. Open to relocation and can work US timezone hours."),
     "remote": os.getenv("ANSWER_REMOTE", "Yes, I have extensive experience working remotely with distributed teams across Turkey, UAE, KSA, and the US."),
     "years_experience": os.getenv("ANSWER_YOE", "8+"),
+    # Sensitive yes/no questions — answered from the candidate's known situation
+    # (Turkey-based: needs sponsorship). Used to pick dropdown options in the
+    # structured ATS appliers. "yes"/"no" are matched against option text.
+    "requires_sponsorship": os.getenv("ANSWER_REQUIRES_SPONSORSHIP", "yes"),
+    "work_authorized": os.getenv("ANSWER_WORK_AUTHORIZED", "no"),
+    "demographic": os.getenv("ANSWER_DEMOGRAPHIC", "Decline to self-identify"),
+    "referral_source": os.getenv("ANSWER_REFERRAL", "LinkedIn"),
     "linkedin": os.getenv("APPLICANT_LINKEDIN", ""),
     "website": os.getenv("APPLICANT_WEBSITE", ""),
     "phone": os.getenv("APPLICANT_PHONE", ""),

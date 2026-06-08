@@ -129,6 +129,33 @@ class TestSubmitAndConfirm:
         assert res.method == "form_filled"
 
 
+class TestSelectTarget:
+    """Dropdown answers must disambiguate authorization vs sponsorship correctly."""
+
+    def setup_method(self):
+        self.app = AutoApplicant()
+
+    def test_requires_sponsorship_yes(self):
+        assert self.app._select_target("Will you now or in future require visa sponsorship?") == "yes"
+
+    def test_authorized_without_sponsorship_is_no(self):
+        # Mentions 'sponsorship' but is an authorization question → must be "no".
+        assert self.app._select_target("Are you legally authorized to work without sponsorship?") == "no"
+
+    def test_authorized_in_country_is_no(self):
+        assert self.app._select_target("Are you authorized to work in the United States?") == "no"
+
+    def test_demographic_declines(self):
+        assert self.app._select_target("Gender") == "decline"
+        assert self.app._select_target("Veteran status") == "decline"
+
+    def test_referral_source(self):
+        assert self.app._select_target("How did you hear about us?") == "linkedin"
+
+    def test_unknown_label_skipped(self):
+        assert self.app._select_target("Favourite colour") is None
+
+
 class TestSetFirst:
     async def test_fills_first_present_selector(self):
         target = FakeElement()
