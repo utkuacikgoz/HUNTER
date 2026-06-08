@@ -159,6 +159,9 @@ FOLLOWUP_SCHEDULE_HOUR = int(os.getenv("FOLLOWUP_SCHEDULE_HOUR", "10"))
 # screenshot for manual review). Flip on to safely validate form-filling against
 # real postings before letting the bot submit for you.
 APPLY_DRY_RUN = os.getenv("APPLY_DRY_RUN", "false").strip().lower() in {"1", "true", "yes", "y"}
+# Max jobs a single /apply run will attempt, so a bulk apply can't burn through
+# every approved job (and per-company application limits) at once. 0 = no cap.
+MAX_APPLIES_PER_RUN = int(os.getenv("MAX_APPLIES_PER_RUN", "10"))
 
 # --- Resume ---
 RESUME_PATH = BASE_DIR / os.getenv("RESUME_PATH", "config/resume.pdf")
