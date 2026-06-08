@@ -6,7 +6,7 @@ import asyncio
 import logging
 import signal
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from logging.handlers import RotatingFileHandler
 
 from applicant.engine import apply_to_approved_jobs
@@ -48,11 +48,13 @@ from telegram_bot.bot import (
     send_followup_reminders,
     send_jobs_batch,
     send_stats_message,
+    send_telegram_alert,
     shutdown_apply_worker,
 )
 from tracker.database import (
     get_approved_jobs,
     get_company_velocity,
+    get_last_scrape_time,
     get_pending_jobs,
     get_stats,
     init_db,
@@ -280,14 +282,26 @@ async def bot():
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.cron import CronTrigger
 
-    scheduler = AsyncIOScheduler()
+    # coalesce: collapse multiple missed runs into one; misfire_grace_time: still
+    # run a job that fired late (e.g. machine was briefly busy/restarting) within
+    # the hour rather than skipping it silently.
+    scheduler = AsyncIOScheduler(
+        job_defaults={"coalesce": True, "misfire_grace_time": 3600}
+    )
 
     async def scheduled_hunt():
         logger.info("Scheduled hunt triggered")
         try:
-            await hunt()
+            results = await hunt()
+            sent = results.get("sent_to_telegram", 0)
+            if sent == 0:
+                await send_telegram_alert(
+                    "⚠️ Daily hunt found 0 new roles to review. Check scraper health "
+                    "(/report) — sources may be down or everything was already seen."
+                )
         except Exception as e:
             logger.error(f"Scheduled hunt failed: {e}")
+            await send_telegram_alert(f"🚨 Daily hunt FAILED: {str(e)[:200]}")
 
     async def scheduled_followup():
         logger.info("Scheduled follow-up check triggered")
@@ -405,6 +419,26 @@ async def bot():
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
+
+    # Catch-up: if the worker was down across the scheduled hunt, the cron simply
+    # doesn't fire. Detect a stale last-scrape (>20h) and run one shortly after boot.
+    async def _catch_up_if_missed():
+        last = get_last_scrape_time()
+        stale = True
+        if last:
+            try:
+                last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=UTC)
+                stale = (datetime.now(UTC) - last_dt) > timedelta(hours=20)
+            except ValueError:
+                stale = True
+        if stale:
+            logger.info(f"Last scrape was {last or 'never'} (>20h) — running catch-up hunt.")
+            await send_telegram_alert("⏰ Missed the daily hunt while offline — running a catch-up now.")
+            await scheduled_hunt()
+
+    asyncio.create_task(_catch_up_if_missed())
 
     logger.info("Bot is running. Scheduler active. Send SIGINT/SIGTERM to stop.")
     try:
