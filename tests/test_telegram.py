@@ -87,29 +87,28 @@ class TestFormatJobMessage:
 
 
 class TestFormatApplyResult:
-    """The apply-status message should make a pre-filled form read as useful,
-    not as a failure, and always surface the job URL for manual cases."""
+    """The apply-status message must be honest: only a confirmed submit is a
+    success; everything else is a manual apply with the job URL."""
 
     JOB = {"title": "Senior PM", "company": "Acme", "url": "https://example.com/job"}
 
-    def test_form_filled_reads_as_actionable_not_failure(self):
+    def test_form_filled_reads_as_manual_not_success(self):
         result = ApplyResult(success=False, method="form_filled", message="unconfirmed")
         msg = _format_apply_result(result, self.JOB)
-        assert "PRE-FILLED" in msg
-        assert "review" in msg.lower() and "submit" in msg.lower()
-        assert "NEEDS MANUAL APPLY" not in msg
+        assert "APPLY MANUALLY" in msg
+        assert "CONFIRMED" not in msg
         assert self.JOB["url"] in msg  # one-tap follow-through
 
     def test_screenshot_only_needs_manual_with_url(self):
         result = ApplyResult(success=False, method="screenshot_only", message="no button")
         msg = _format_apply_result(result, self.JOB)
-        assert "NEEDS MANUAL APPLY" in msg
+        assert "APPLY MANUALLY" in msg
         assert self.JOB["url"] in msg
 
     def test_external_redirect_needs_manual_with_url(self):
         result = ApplyResult(success=False, method="external_redirect", message="redirect")
         msg = _format_apply_result(result, self.JOB)
-        assert "NEEDS MANUAL APPLY" in msg
+        assert "APPLY MANUALLY" in msg
         assert self.JOB["url"] in msg
 
     def test_success_reads_as_applied(self):
