@@ -74,6 +74,10 @@ _US_STATE_HINTS = {
 }
 _REMOTE_TOKENS = {"remote", "work from home", "wfh", "anywhere", "distributed", "fully remote"}
 _CANADA_TOKENS = {"canada", "toronto", "vancouver", "montreal", "ontario", "quebec"}
+# Explicit US-residence markers that appear in role TITLES (e.g. "VP Product - US-Based").
+_TITLE_US_LOCK_TOKENS = {
+    "us based", "u s based", "us only", "u s only", "usa only", "united states only",
+}
 # Tokens that signal a remote role is open beyond a single country — so a US/Canada
 # mention alongside one of these is NOT a residence lock.
 _GLOBAL_REMOTE_TOKENS = {"worldwide", "anywhere", "global", "globally", "any country", "any location"}
@@ -131,8 +135,14 @@ def detect_country_locked_remote(job: dict) -> str | None:
     sponsor-friendly company.
 
     Returns the location text when locked, else None. Checks the structured
-    location field only; description prose ("our US team") is too noisy.
+    location field plus explicit US-lock markers in the title ("US-Based"); other
+    description prose ("our US team") is too noisy.
     """
+    # Explicit US-lock in the title is a strong signal regardless of location
+    # (e.g. "VP of Product - US-Based" with location "Remote").
+    ntitle = _normalize(job.get("title"))
+    if _has(ntitle, _TITLE_US_LOCK_TOKENS):
+        return (job.get("title") or "").strip()
     nloc = _normalize(job.get("location"))
     if not _has(nloc, _REMOTE_TOKENS):
         return None

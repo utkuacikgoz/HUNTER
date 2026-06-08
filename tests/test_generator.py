@@ -28,6 +28,27 @@ class TestIsAnswerableQuestion:
         assert generate_form_answer("<<<cards[x][field1]>>>") == ""
 
 
+class TestDedash:
+    def setup_method(self):
+        from prompts.generator import _dedash
+        self.dedash = _dedash
+
+    def test_spaced_em_dash_becomes_comma(self):
+        assert self.dedash("Toptal's model — connecting talent — is great") == \
+            "Toptal's model, connecting talent, is great"
+
+    def test_bare_dash_becomes_hyphen(self):
+        assert "—" not in self.dedash("growth—driven")
+        assert "–" not in self.dedash("2020–2024")
+
+    def test_keeps_normal_hyphens(self):
+        assert self.dedash("end-to-end ownership") == "end-to-end ownership"
+
+    def test_no_dashes_left(self):
+        out = self.dedash("a — b – c—d–e")
+        assert "—" not in out and "–" not in out
+
+
 class TestSanitizeExternalText:
     def setup_method(self):
         from prompts.generator import _sanitize_external_text
