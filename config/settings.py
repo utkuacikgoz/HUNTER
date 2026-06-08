@@ -154,6 +154,12 @@ HUNT_SCHEDULE_HOUR = int(os.getenv("HUNT_SCHEDULE_HOUR", "9"))
 HUNT_SCHEDULE_MINUTE = int(os.getenv("HUNT_SCHEDULE_MINUTE", "0"))
 FOLLOWUP_SCHEDULE_HOUR = int(os.getenv("FOLLOWUP_SCHEDULE_HOUR", "10"))
 
+# --- Apply engine ---
+# When true, structured ATS appliers fill the form but DO NOT click submit (they
+# screenshot for manual review). Flip on to safely validate form-filling against
+# real postings before letting the bot submit for you.
+APPLY_DRY_RUN = os.getenv("APPLY_DRY_RUN", "false").strip().lower() in {"1", "true", "yes", "y"}
+
 # --- Resume ---
 RESUME_PATH = BASE_DIR / os.getenv("RESUME_PATH", "config/resume.pdf")
 

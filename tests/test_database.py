@@ -22,8 +22,10 @@ with mock.patch.dict(os.environ, {"DB_PATH": _tmp.name}):
         get_company_velocity,
         get_connection,
         get_filter_precision,
+        get_funnel,
         get_job_by_id,
         get_jobs_needing_followup,
+        get_last_scrape_time,
         get_pending_jobs,
         get_stats,
         init_db,
@@ -407,3 +409,22 @@ class TestDuplicateApplyGuard:
 
     def test_get_job_by_id_returns_none_for_missing(self):
         assert get_job_by_id(999999) is None
+
+
+class TestFunnelAndWatchdog:
+    def test_last_scrape_time_tracks_runs(self):
+        before = get_last_scrape_time()  # may be set by earlier tests
+        record_scraper_run("greenhouse", 5)
+        after = get_last_scrape_time()
+        assert after is not None
+        if before is not None:
+            assert after >= before
+
+    def test_get_funnel_shape(self):
+        insert_job("PM", "FunnelCo", "Remote", "", "https://example.com/funnel1",
+                   "greenhouse", filter_verdict="include")
+        f = get_funnel()
+        assert "verdicts" in f and "statuses" in f
+        assert "apply_confirmed" in f and "apply_failed" in f
+        assert f["verdicts"].get("include", 0) >= 1
+        assert f["statuses"].get("pending", 0) >= 1
