@@ -41,6 +41,14 @@ def _sanitize_external_text(text: str, max_len: int = 2000) -> str:
     return sanitized
 
 
+def _dedash(text: str) -> str:
+    """Strip the AI-tell em/en dashes. A spaced dash becomes a comma; a bare one
+    becomes a hyphen (keeps 'end-to-end' style words intact)."""
+    text = text.replace(" — ", ", ").replace(" – ", ", ")
+    text = text.replace("—", "-").replace("–", "-")
+    return text
+
+
 def generate_cover_letter(job_title: str, company: str, job_description: str = "") -> str:
     """Generate a tailored cover letter for a specific job."""
     try:
@@ -66,6 +74,9 @@ INSTRUCTIONS:
 - End with a clear call to action
 - Don't include addresses or date headers - just the body text
 - Sign off with the candidate's name from the resume
+- Write like a human, not AI: do NOT use em dashes (—) or en dashes (–). Use
+  periods, commas, or "and"/"but" instead. Avoid the "not X, but Y" cliche and
+  buzzwords ("leverage", "spearhead", "synergy", "passionate", "thrilled").
 """
         response = c.messages.create(
             model=CLAUDE_MODEL,
@@ -75,7 +86,7 @@ INSTRUCTIONS:
                 {"role": "user", "content": prompt},
             ],
         )
-        return response.content[0].text.strip()
+        return _dedash(response.content[0].text.strip())
 
     except Exception as e:
         logger.error(f"Cover letter generation failed: {e}")
@@ -135,7 +146,7 @@ INSTRUCTIONS:
                 {"role": "user", "content": prompt},
             ],
         )
-        return response.content[0].text.strip()
+        return _dedash(response.content[0].text.strip())
 
     except Exception as e:
         logger.error(f"Form answer generation failed: {e}")
