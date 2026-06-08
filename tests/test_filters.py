@@ -140,6 +140,16 @@ class TestDetectCountryLockedRemote:
         # not-remote drop instead.
         assert detect_country_locked_remote({"location": "San Francisco, CA"}) is None
 
+    def test_us_based_in_title_is_locked(self):
+        # The Toptal case: "US-Based" in the title with a non-US-locked location.
+        job = {"title": "VP of Product - US-Based", "location": "Remote"}
+        assert detect_country_locked_remote(job) is not None
+
+    def test_us_only_in_title_is_locked(self):
+        assert detect_country_locked_remote(
+            {"title": "Senior PM (US only)", "location": "Remote"}
+        ) is not None
+
 
 class TestCheckSponsorAllowlist:
     def test_known_friendly_company(self):
