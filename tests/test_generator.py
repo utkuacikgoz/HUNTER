@@ -28,6 +28,39 @@ class TestIsAnswerableQuestion:
         assert generate_form_answer("<<<cards[x][field1]>>>") == ""
 
 
+class TestModelTiering:
+    """Cover letters use the strong model; cheap form answers use the base model."""
+
+    def _fake_client(self, captured):
+        class _Resp:
+            def __init__(self, text):
+                self.content = [type("B", (), {"text": text})()]
+
+        class _Msgs:
+            def create(self, **kwargs):
+                captured["model"] = kwargs["model"]
+                return _Resp("A clean answer.")
+
+        class _Client:
+            messages = _Msgs()
+
+        return _Client()
+
+    def test_cover_letter_uses_cover_letter_model(self, monkeypatch):
+        import prompts.generator as g
+        captured = {}
+        monkeypatch.setattr(g, "_get_client", lambda: self._fake_client(captured))
+        g.generate_cover_letter("PM", "Acme", "Build great products")
+        assert captured["model"] == g.COVER_LETTER_MODEL
+
+    def test_form_answer_uses_base_model(self, monkeypatch):
+        import prompts.generator as g
+        captured = {}
+        monkeypatch.setattr(g, "_get_client", lambda: self._fake_client(captured))
+        g.generate_form_answer("Why do you want to work here at this company?")
+        assert captured["model"] == g.CLAUDE_MODEL
+
+
 class TestDedash:
     def setup_method(self):
         from prompts.generator import _dedash
