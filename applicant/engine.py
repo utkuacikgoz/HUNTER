@@ -6,9 +6,13 @@ from pathlib import Path
 
 from playwright.async_api import Page, async_playwright
 
-from config.settings import LINKEDIN_SESSION_COOKIE, RESUME_PATH
-from prompts.generator import COMMON_ANSWERS, generate_cover_letter
+from config.settings import APPLY_DRY_RUN, LINKEDIN_SESSION_COOKIE, RESUME_PATH
+from prompts.generator import COMMON_ANSWERS, generate_cover_letter, generate_form_answer
 from tracker.database import get_job_by_id, log_action, mark_applied, set_cover_letter
+
+# Cache LLM answers per question text within a process so we don't pay for the
+# same free-text question twice across a batch of applications.
+_ANSWER_CACHE: dict[str, str] = {}
 
 
 @dataclass
@@ -86,6 +90,10 @@ class AutoApplicant:
                 result = await self._apply_linkedin(job, cover_letter)
             elif platform == "wellfound":
                 result = await self._apply_wellfound(job, cover_letter)
+            elif platform == "greenhouse":
+                result = await self._apply_greenhouse(job, cover_letter)
+            elif platform == "lever":
+                result = await self._apply_lever(job, cover_letter)
             else:
                 result = await self._apply_generic(job, cover_letter)
 
@@ -319,6 +327,237 @@ class AutoApplicant:
             return COMMON_ANSWERS["availability"]
 
         return ""
+
+    async def _resolve_field_value(
+        self, hint: str, cover_letter: str, *, is_freetext: bool
+    ) -> str:
+        """Static COMMON_ANSWERS match first; for an unmatched free-text question
+        fall back to an LLM-generated, cached answer (wires generate_form_answer)."""
+        value = self._match_field_value(hint, cover_letter)
+        if value:
+            return value
+        question = hint.strip()
+        if not is_freetext or len(question) < 8:
+            return ""
+        if question in _ANSWER_CACHE:
+            return _ANSWER_CACHE[question]
+        try:
+            answer = await asyncio.to_thread(generate_form_answer, question)
+        except Exception as e:
+            logger.debug(f"LLM form answer failed for {question!r}: {e}")
+            answer = ""
+        _ANSWER_CACHE[question] = answer
+        return answer
+
+    async def _set_first(self, page: Page, selectors: list[str], value: str) -> bool:
+        """Fill the first matching selector with `value`. Returns True if filled."""
+        if not value:
+            return False
+        for sel in selectors:
+            el = await page.query_selector(sel)
+            if el:
+                try:
+                    await el.fill(value)
+                    return True
+                except Exception as e:
+                    logger.debug(f"fill {sel} failed: {e}")
+        return False
+
+    async def _upload_resume(self, page: Page, selectors: list[str]) -> None:
+        if not RESUME_PATH.exists():
+            logger.warning(f"Resume not found at {RESUME_PATH}; skipping upload")
+            return
+        for sel in selectors:
+            el = await page.query_selector(sel)
+            if el:
+                try:
+                    await el.set_input_files(str(RESUME_PATH))
+                    await asyncio.sleep(1)
+                    return
+                except Exception as e:
+                    logger.debug(f"resume upload {sel} failed: {e}")
+
+    async def _fill_labeled_questions(self, page: Page, cover_letter: str) -> None:
+        """Fill remaining labeled text fields / custom questions, using the LLM for
+        free-text (textarea) questions that don't match a canned answer."""
+        fields = await page.query_selector_all(
+            "textarea, input[type='text']:not([readonly]), input:not([type]):not([readonly])"
+        )
+        for el in fields:
+            try:
+                if await el.input_value():
+                    continue
+                label = await el.evaluate(
+                    """el => {
+                        let t = '';
+                        const id = el.getAttribute('id');
+                        if (id) { const l = document.querySelector('label[for="'+id+'"]'); if (l) t = l.textContent; }
+                        if (!t) { const l = el.closest('div')?.querySelector('label'); if (l) t = l.textContent; }
+                        return (t || el.getAttribute('aria-label') || el.getAttribute('name') || '').trim();
+                    }"""
+                )
+                tag = await el.evaluate("el => el.tagName.toLowerCase()")
+                value = await self._resolve_field_value(
+                    label, cover_letter, is_freetext=(tag == "textarea")
+                )
+                if value:
+                    await el.fill(value)
+                    await asyncio.sleep(0.2)
+            except Exception as e:
+                logger.debug(f"labeled question skipped: {e}")
+
+    async def _submit_and_confirm(
+        self, page: Page, job: dict, platform: str, *,
+        submit_selectors: list[str], confirm_selectors: list[str],
+        confirm_url_substrings: list[str],
+    ) -> ApplyResult:
+        """Submit the form and only report success when a confirmation is detected.
+
+        Honors APPLY_DRY_RUN (fills but never submits). Never returns success unless
+        the page confirms the application landed, so a failed/blocked submit is
+        surfaced for manual review instead of being falsely marked applied.
+        """
+        ss_path = str(SCREENSHOTS_DIR / f"{platform}_{job['id']}.png")
+        if APPLY_DRY_RUN:
+            await page.screenshot(path=ss_path)
+            return ApplyResult(
+                success=False, method="form_filled", screenshot_path=ss_path,
+                message="DRY RUN: form filled, submit skipped (APPLY_DRY_RUN).",
+            )
+        submitted = False
+        for sel in submit_selectors:
+            btn = await page.query_selector(sel)
+            if btn:
+                try:
+                    await btn.click()
+                    submitted = True
+                    break
+                except Exception as e:
+                    logger.debug(f"submit click {sel} failed: {e}")
+        if not submitted:
+            await page.screenshot(path=ss_path)
+            return ApplyResult(
+                success=False, method="form_filled", screenshot_path=ss_path,
+                message="Filled form but found no submit button — needs manual apply.",
+            )
+        await asyncio.sleep(PAGE_SETTLE_S)
+        url = (page.url or "").lower()
+        confirmed = any(s in url for s in confirm_url_substrings)
+        if not confirmed:
+            for sel in confirm_selectors:
+                if await page.query_selector(sel):
+                    confirmed = True
+                    break
+        await page.screenshot(path=ss_path)
+        if confirmed:
+            return ApplyResult(
+                success=True, method="submitted", screenshot_path=ss_path,
+                message="Application submitted and confirmed.",
+            )
+        return ApplyResult(
+            success=False, method="form_filled", screenshot_path=ss_path,
+            message="Submitted but no confirmation detected — verify manually.",
+        )
+
+    async def _apply_greenhouse(self, job: dict, cover_letter: str) -> ApplyResult:
+        """Structured apply for Greenhouse boards (stable field ids/names)."""
+        context = await self._new_context()
+        page = await context.new_page()
+        try:
+            await page.goto(job["url"], wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+            await asyncio.sleep(PAGE_SETTLE_S)
+            apply_btn = await page.query_selector(
+                "a#apply_button, button:has-text('Apply'), a:has-text('Apply for this job')"
+            )
+            if apply_btn:
+                try:
+                    await apply_btn.click()
+                    await asyncio.sleep(PAGE_SETTLE_S)
+                except Exception as e:
+                    logger.debug(f"greenhouse apply button click: {e}")
+
+            await self._set_first(
+                page, ["#first_name", "input[name='first_name']", "input[autocomplete='given-name']"],
+                COMMON_ANSWERS["first_name"],
+            )
+            await self._set_first(
+                page, ["#last_name", "input[name='last_name']", "input[autocomplete='family-name']"],
+                COMMON_ANSWERS["last_name"],
+            )
+            await self._set_first(
+                page, ["#email", "input[name='email']", "input[type='email']"], COMMON_ANSWERS["email"],
+            )
+            await self._set_first(
+                page, ["#phone", "input[name='phone']", "input[type='tel']"], COMMON_ANSWERS["phone"],
+            )
+            await self._upload_resume(page, ["#resume", "input[name='resume']", "input[type='file']"])
+            await self._set_first(
+                page, ["#cover_letter_text", "textarea[name='cover_letter_text']",
+                       "textarea[aria-label*='cover' i]"], cover_letter,
+            )
+            await self._fill_labeled_questions(page, cover_letter)
+            return await self._submit_and_confirm(
+                page, job, "greenhouse",
+                submit_selectors=["#submit_app", "button[type='submit']", "button:has-text('Submit')"],
+                confirm_selectors=[
+                    "#application_confirmation",
+                    "*:has-text('Thank you for applying')",
+                    "*:has-text('application has been submitted')",
+                ],
+                confirm_url_substrings=["confirmation", "thank"],
+            )
+        except Exception as e:
+            logger.error(f"Greenhouse apply error: {e}")
+            return ApplyResult(success=False, method="error", message=str(e)[:200])
+        finally:
+            await self._safe_close(page, context)
+
+    async def _apply_lever(self, job: dict, cover_letter: str) -> ApplyResult:
+        """Structured apply for Lever postings (the /apply form)."""
+        context = await self._new_context()
+        page = await context.new_page()
+        try:
+            url = job["url"].rstrip("/")
+            if not url.endswith("/apply"):
+                url = url + "/apply"
+            await page.goto(url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+            await asyncio.sleep(PAGE_SETTLE_S)
+
+            await self._set_first(page, ["input[name='name']"], COMMON_ANSWERS["name"])
+            await self._set_first(page, ["input[name='email']"], COMMON_ANSWERS["email"])
+            await self._set_first(page, ["input[name='phone']"], COMMON_ANSWERS["phone"])
+            await self._set_first(
+                page, ["input[name='urls[LinkedIn]']", "input[name='urls[LinkedIn URL]']"],
+                COMMON_ANSWERS["linkedin"],
+            )
+            await self._upload_resume(page, ["input[name='resume']", "input[type='file']"])
+            await self._set_first(page, ["textarea[name='comments']"], cover_letter)
+            await self._fill_labeled_questions(page, cover_letter)
+            return await self._submit_and_confirm(
+                page, job, "lever",
+                submit_selectors=["button[type='submit']", "button:has-text('Submit application')", "#btn-submit"],
+                confirm_selectors=[
+                    "*:has-text('Thank you')",
+                    "*:has-text('application has been submitted')",
+                    "*:has-text('received your application')",
+                ],
+                confirm_url_substrings=["thanks", "thank", "confirmation"],
+            )
+        except Exception as e:
+            logger.error(f"Lever apply error: {e}")
+            return ApplyResult(success=False, method="error", message=str(e)[:200])
+        finally:
+            await self._safe_close(page, context)
+
+    async def _safe_close(self, page, context) -> None:
+        try:
+            await page.close()
+        except Exception as e:
+            logger.debug(f"page.close failed: {e}")
+        try:
+            await context.close()
+        except Exception as e:
+            logger.debug(f"context.close failed: {e}")
 
     async def _apply_wellfound(self, job: dict, cover_letter: str) -> ApplyResult:
         """Apply via Wellfound."""
