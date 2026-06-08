@@ -99,8 +99,10 @@ class AutoApplicant:
                 result = await self._apply_greenhouse(job, cover_letter)
             elif platform == "lever":
                 result = await self._apply_lever(job, cover_letter)
+            elif platform == "ashby":
+                result = await self._apply_ashby(job, cover_letter)
             else:
-                # ATSes we can't drive reliably (Ashby/Recruitee/SmartRecruiters):
+                # ATSes we can't drive reliably (Recruitee/SmartRecruiters):
                 # skip the browser entirely and hand off a fast manual apply — the
                 # cover letter is already generated and sent for copy/paste.
                 result = ApplyResult(
@@ -336,6 +338,8 @@ class AutoApplicant:
             return COMMON_ANSWERS["work_authorization"]
         if "available" in hint or "start date" in hint:
             return COMMON_ANSWERS["availability"]
+        if hint.strip() in ("location", "your location", "current location", "city"):
+            return COMMON_ANSWERS["location"]
 
         return ""
 
@@ -483,6 +487,49 @@ class AutoApplicant:
             except Exception as e:
                 logger.debug(f"select fill skipped: {e}")
 
+    async def _fill_radios(self, page: Page) -> None:
+        """Answer Yes/No radio-group questions (Ashby uses radios, not selects, for
+        the work-authorization / sponsorship / EEO questions)."""
+        groups = await page.evaluate(
+            """() => {
+                const out = {};
+                document.querySelectorAll('input[type=radio]').forEach(r => {
+                    const optLabel = (r.id && document.querySelector('label[for="'+r.id+'"]')?.textContent || '').trim();
+                    let q = '', el = r;
+                    for (let i = 0; i < 6 && el; i++) {
+                        el = el.parentElement;
+                        if (!el) break;
+                        const lab = el.querySelector('label, legend');
+                        if (lab) {
+                            const t = lab.textContent.trim();
+                            if (t && !/^(yes|no)$/i.test(t)) { q = t; break; }
+                        }
+                    }
+                    if (!out[r.name]) out[r.name] = {question: q, options: []};
+                    out[r.name].options.push({id: r.id, label: optLabel});
+                });
+                return out;
+            }"""
+        )
+        for grp in groups.values():
+            target = self._select_target(grp.get("question", ""))
+            if not target:
+                continue
+            for opt in grp["options"]:
+                lab = (opt["label"] or "").strip().lower()
+                if target in ("yes", "no"):
+                    match = lab == target or lab.startswith(target)
+                elif target == "decline":
+                    match = any(p in lab for p in ("decline", "prefer not", "wish not"))
+                else:
+                    match = target in lab
+                if match and opt["id"]:
+                    try:
+                        await page.click(f'label[for="{opt["id"]}"]')
+                    except Exception as e:
+                        logger.debug(f"radio click failed: {e}")
+                    break
+
     async def _submit_and_confirm(
         self, page: Page, job: dict, platform: str, *,
         submit_selectors: list[str], confirm_selectors: list[str],
@@ -624,6 +671,54 @@ class AutoApplicant:
             )
         except Exception as e:
             logger.error(f"Lever apply error: {e}")
+            return ApplyResult(success=False, method="error", message=str(e)[:200])
+        finally:
+            await self._safe_close(page, context)
+
+    async def _apply_ashby(self, job: dict, cover_letter: str) -> ApplyResult:
+        """Structured apply for Ashby hosted forms (jobs.ashbyhq.com/{board}/{id}).
+
+        Ashby uses stable _systemfield_* ids for name/email/résumé and radio groups
+        for the work-auth/sponsorship questions. Some boards add a reCAPTCHA; if it
+        blocks the submit, confirmation isn't detected and it degrades to manual.
+        """
+        context = await self._new_context()
+        page = await context.new_page()
+        try:
+            url = job["url"].rstrip("/")
+            if not url.endswith("/application"):
+                url = url + "/application"
+            await page.goto(url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+            await asyncio.sleep(PAGE_SETTLE_S + 1)  # React form needs a beat to render
+
+            await self._set_first(
+                page, ["#_systemfield_name", "input[name='_systemfield_name']"],
+                COMMON_ANSWERS["name"],
+            )
+            await self._set_first(
+                page, ["#_systemfield_email", "input[name='_systemfield_email']", "input[type='email']"],
+                COMMON_ANSWERS["email"],
+            )
+            await self._set_first(page, ["input[type='tel']"], COMMON_ANSWERS["phone"])
+            await self._upload_resume(page, ["#_systemfield_resume", "input[type='file']"])
+            await self._fill_labeled_questions(page, cover_letter, job)
+            await self._fill_selects(page)
+            await self._fill_radios(page)
+            return await self._submit_and_confirm(
+                page, job, "ashby",
+                submit_selectors=[
+                    "button:has-text('Submit Application')", "button[type='submit']",
+                    "button:has-text('Submit')",
+                ],
+                confirm_selectors=[
+                    "*:has-text('has been submitted')",
+                    "*:has-text('Application received')",
+                    "*:has-text('Thank you')",
+                ],
+                confirm_url_substrings=["thank", "submitted", "confirmation", "success"],
+            )
+        except Exception as e:
+            logger.error(f"Ashby apply error: {e}")
             return ApplyResult(success=False, method="error", message=str(e)[:200])
         finally:
             await self._safe_close(page, context)
