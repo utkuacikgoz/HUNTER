@@ -80,14 +80,17 @@ GREENHOUSE_BOARDS = _csv_list(
     # EU/EMEA-focused (live-verified 2026-06-07/08/09; hire product in EU/EMEA)
     "monzo,sumup,getyourguide,doctolib,celonis,wolt,n26,hellofresh,trustpilot,"
     "skyscanner,unity3d,adyen,algolia,raisin,cleo,graphcore,freenow,consensys,"
+    # YC / well-known startups (live-verified 2026-06-09; region filter drops US-only)
+    "brex,gusto,clickhouse,flexport,checkr,mixpanel,webflow,lithic,highnote,"
     # tier-1
     "stripe,datadog,mongodb,canonical,cloudflare,figma,gitlab,elastic,postman,"
     "vercel,discord,mozilla,mattermost,remote",
 )
 LEVER_BOARDS = _csv_list(
     "LEVER_BOARDS",
-    # live-verified 2026-06-08/09: mistral/contentsquare/younited added
-    "qonto,vestiairecollective,spotify,toptal,mistral,contentsquare,younited",
+    # live-verified 2026-06-08/09: mistral/contentsquare/younited + YC (metabase/finch)
+    "qonto,vestiairecollective,spotify,toptal,mistral,contentsquare,younited,"
+    "metabase,finch",
 )
 ASHBY_BOARDS = _csv_list(
     "ASHBY_BOARDS",
@@ -96,6 +99,9 @@ ASHBY_BOARDS = _csv_list(
     "paxos,backmarket,gorgias,posthog,workos,fonoa,"
     # EU/EMEA-focused (live-verified 2026-06-08/09)
     "synthesia,alan,tacto,wayve,vanta,photoroom,harvey,plaid,"
+    # YC / AI-infra startups (live-verified 2026-06-09; often global/remote)
+    "zip,cohere,temporal,replit,watershed,airbyte,mux,render,baseten,neon,"
+    "weaviate,pinecone,langchain,llamaindex,column,"
     # tier-1
     "notion,1password,clickup,deel,n8n,linear,zapier,supabase,buffer",
 )
