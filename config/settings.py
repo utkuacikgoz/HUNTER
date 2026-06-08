@@ -77,25 +77,25 @@ GREENHOUSE_BOARDS = _csv_list(
     # tier-2/3 (fintech / crypto / marketplace / saas)
     "gocardless,form3,tide,truelayer,mercury,fireblocks,bitpanda,nansen,faire,"
     "wallapop,gigs,contentful,typeform,planetscale,"
-    # EU/EMEA-focused (live-verified 2026-06-07/08; hire product in EU/EMEA)
+    # EU/EMEA-focused (live-verified 2026-06-07/08/09; hire product in EU/EMEA)
     "monzo,sumup,getyourguide,doctolib,celonis,wolt,n26,hellofresh,trustpilot,"
-    "skyscanner,unity3d,adyen,algolia,raisin,cleo,"
+    "skyscanner,unity3d,adyen,algolia,raisin,cleo,graphcore,freenow,consensys,"
     # tier-1
     "stripe,datadog,mongodb,canonical,cloudflare,figma,gitlab,elastic,postman,"
     "vercel,discord,mozilla,mattermost,remote",
 )
 LEVER_BOARDS = _csv_list(
     "LEVER_BOARDS",
-    # live-verified 2026-06-08: mistral/contentsquare (Paris) added
-    "qonto,vestiairecollective,spotify,toptal,mistral,contentsquare",
+    # live-verified 2026-06-08/09: mistral/contentsquare/younited added
+    "qonto,vestiairecollective,spotify,toptal,mistral,contentsquare,younited",
 )
 ASHBY_BOARDS = _csv_list(
     "ASHBY_BOARDS",
     # tier-2/3
     "pleo,mollie,pennylane,sardine,taktile,swan,ramp,ledger,blockdaemon,safe,"
     "paxos,backmarket,gorgias,posthog,workos,fonoa,"
-    # EU/EMEA-focused (live-verified 2026-06-08)
-    "synthesia,alan,tacto,wayve,"
+    # EU/EMEA-focused (live-verified 2026-06-08/09)
+    "synthesia,alan,tacto,wayve,vanta,photoroom,harvey,plaid,"
     # tier-1
     "notion,1password,clickup,deel,n8n,linear,zapier,supabase,buffer",
 )
