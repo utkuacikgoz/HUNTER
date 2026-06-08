@@ -21,6 +21,7 @@ from config.settings import (
     HUNT_SCHEDULE_MINUTE,
     LOCATIONS,
     LOG_LEVEL,
+    MAX_APPLIES_PER_RUN,
     MAX_JOBS_PER_DAY,
     MAX_QUERIES_PER_RUN,
     SCRAPER_SKIP_AFTER_ZEROS,
@@ -231,11 +232,14 @@ async def apply():
         logger.info("No approved jobs to apply to")
         return {"total": 0, "success": 0, "failed": 0, "needs_manual": 0}
 
-    logger.info(f"🚀 Applying to {len(approved)} approved jobs...")
+    logger.info(f"🚀 Applying to {len(approved)} approved jobs (cap {MAX_APPLIES_PER_RUN}/run)...")
     results = await apply_to_approved_jobs(approved, headless=True)
+    skipped = results.get("skipped_over_cap", 0)
     logger.info(
         f"✅ Applied: {results['success']}/{results['total']} "
-        f"(Failed: {results['failed']}, Needs manual: {results['needs_manual']})"
+        f"(Failed: {results['failed']}, Needs manual: {results['needs_manual']}"
+        + (f", {skipped} left for next run — over the per-run cap" if skipped else "")
+        + ")"
     )
 
     # Send stats after applying
@@ -375,10 +379,12 @@ async def bot():
             return
         await update.message.reply_text(f"Applying to {len(approved)} jobs... This will take a while.")
         results = await apply()
+        skipped = results.get("skipped_over_cap", 0)
         await update.message.reply_text(
             f"Done!\n"
-            f"Applied: {results['success']}/{results['total']}\n"
-            f"Failed: {results['failed']}"
+            f"✅ Submitted: {results['success']}/{results['total']}\n"
+            f"📝 Manual: {results['needs_manual']} | ❌ Failed: {results['failed']}"
+            + (f"\n⏭️ {skipped} left for next /apply (per-run cap {MAX_APPLIES_PER_RUN})" if skipped else "")
         )
 
     async def cmd_review(update, context):

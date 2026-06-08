@@ -156,6 +156,39 @@ class TestSelectTarget:
         assert self.app._select_target("Favourite colour") is None
 
 
+class TestApplyCap:
+    async def test_caps_per_run_and_buckets_manual(self, monkeypatch):
+        import applicant.engine as eng
+        monkeypatch.setattr(eng, "MAX_APPLIES_PER_RUN", 2)
+
+        calls = []
+
+        class FakeApplicant:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def apply_to_job(self, job):
+                calls.append(job["id"])
+                return eng.ApplyResult(success=False, method="manual_handoff", message="x")
+
+        monkeypatch.setattr(eng, "AutoApplicant", lambda headless=True: FakeApplicant())
+
+        async def no_sleep(*a, **k):
+            return None
+
+        monkeypatch.setattr(eng.asyncio, "sleep", no_sleep)
+
+        jobs = [{"id": i, "title": "PM", "company": "c", "url": "u"} for i in range(5)]
+        res = await eng.apply_to_approved_jobs(jobs)
+        assert calls == [0, 1]                 # only 2 attempted
+        assert res["total"] == 2
+        assert res["skipped_over_cap"] == 3
+        assert res["needs_manual"] == 2        # manual_handoff bucketed correctly
+
+
 class TestSetFirst:
     async def test_fills_first_present_selector(self):
         target = FakeElement()

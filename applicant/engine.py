@@ -6,7 +6,12 @@ from pathlib import Path
 
 from playwright.async_api import Page, async_playwright
 
-from config.settings import APPLY_DRY_RUN, LINKEDIN_SESSION_COOKIE, RESUME_PATH
+from config.settings import (
+    APPLY_DRY_RUN,
+    LINKEDIN_SESSION_COOKIE,
+    MAX_APPLIES_PER_RUN,
+    RESUME_PATH,
+)
 from prompts.generator import COMMON_ANSWERS, generate_cover_letter, generate_form_answer
 from tracker.database import get_job_by_id, log_action, mark_applied, set_cover_letter
 
@@ -770,15 +775,21 @@ async def apply_to_single_job(job: dict, headless=True) -> ApplyResult:
 
 
 async def apply_to_approved_jobs(jobs: list[dict], headless=True) -> dict:
-    """Apply to all approved jobs and return results summary."""
-    results = {"success": 0, "failed": 0, "needs_manual": 0, "total": len(jobs)}
+    """Apply to approved jobs (capped per run) and return a results summary."""
+    cap = MAX_APPLIES_PER_RUN if MAX_APPLIES_PER_RUN > 0 else len(jobs)
+    batch = jobs[:cap]
+    skipped = len(jobs) - len(batch)
+    results = {
+        "success": 0, "failed": 0, "needs_manual": 0,
+        "total": len(batch), "skipped_over_cap": skipped,
+    }
 
     async with AutoApplicant(headless=headless) as applicant:
-        for job in jobs:
+        for job in batch:
             result = await applicant.apply_to_job(job)
             if result.success:
                 results["success"] += 1
-            elif result.method in ("screenshot_only", "external_redirect"):
+            elif result.method in ("screenshot_only", "external_redirect", "manual_handoff", "form_filled"):
                 results["needs_manual"] += 1
             else:
                 results["failed"] += 1
