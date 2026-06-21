@@ -58,7 +58,7 @@ cp .env.example .env    # local dev
 `validate_config(command)` in settings.py defines what each subcommand *requires* vs. warns on.
 
 **Secrets** (→ `fly secrets`): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ANTHROPIC_API_KEY`,
-`RESUME_TEXT`, all `APPLICANT_*` PII, and optional `LINKEDIN_SESSION_COOKIE` / `INDEED_API_KEY`.
+`RESUME_TEXT`, all `APPLICANT_*` PII, and optional `LINKEDIN_SESSION_COOKIE`.
 Everything else is non-secret config.
 
 Required vars by command (from `validate_config`):

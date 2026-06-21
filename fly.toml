@@ -16,7 +16,7 @@
 #     APPLICANT_NAME="..." APPLICANT_FIRST_NAME="..." APPLICANT_LAST_NAME="..." \
 #     APPLICANT_EMAIL="..." APPLICANT_PHONE="..." \
 #     APPLICANT_LINKEDIN="..." APPLICANT_WEBSITE="..."
-#     # optional: LINKEDIN_SESSION_COOKIE=...  INDEED_API_KEY=...
+#     # optional: LINKEDIN_SESSION_COOKIE=...
 #
 # NON-SECRET CONFIG → the [env] block below (committed). Anything not set here
 # falls back to the defaults in config/settings.py. See .env.example for the
