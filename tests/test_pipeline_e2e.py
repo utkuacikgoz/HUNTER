@@ -77,6 +77,48 @@ async def test_hunt_classifies_persists_and_dispatches(temp_db, monkeypatch):
     assert verdicts["https://example.com/acme-pm"] == "drop"
 
 
+async def test_drops_do_not_consume_review_budget(temp_db, monkeypatch):
+    # MAX_JOBS_PER_DAY caps REVIEWABLE jobs, not total inserts: a burst of drops
+    # ahead of the good jobs must not exhaust the budget before the includes are
+    # reached. (Under the old total-insert cap, the leading drops would stop the
+    # loop and the includes would never be classified.)
+    monkeypatch.setattr(main, "MAX_JOBS_PER_DAY", 2)
+    scraped = [
+        {
+            "title": "US PM", "company": f"AcmeUS{i}", "location": "Remote",
+            "salary": "", "url": f"https://example.com/drop-{i}", "platform": "remoteok",
+            "description": "Must be located in the United States. No visa sponsorship.",
+        }
+        for i in range(5)
+    ] + [
+        {
+            "title": "Senior Product Manager", "company": "Stripe",
+            "location": "Remote, Europe", "salary": "",
+            "url": f"https://example.com/keep-{i}", "platform": "remoteok",
+            "description": "EU remote role.",
+        }
+        for i in range(2)
+    ]
+
+    async def fake_scrape_all():
+        return scraped
+
+    captured = {}
+
+    async def fake_send_jobs_batch(pending, velocity=None):
+        captured["pending"] = pending
+
+    monkeypatch.setattr(main, "_scrape_all", fake_scrape_all)
+    monkeypatch.setattr(main, "send_jobs_batch", fake_send_jobs_batch)
+
+    result = await main.hunt()
+
+    # All 7 persisted; both includes dispatched despite cap=2 and 5 leading drops.
+    assert result["new"] == 7
+    assert result["sent_to_telegram"] == 2
+    assert {j["title"] for j in captured["pending"]} == {"Senior Product Manager"}
+
+
 async def test_apply_marks_approved_jobs_applied(temp_db, monkeypatch):
     job_id = database.insert_job(
         title="PM", company="Acme", location="Remote", salary="",
