@@ -65,7 +65,9 @@ _EMEA_TOKENS = {
 }
 # Short / ambiguous tokens — only trusted in the structured location field, never
 # free-text description (avoids "join us" -> USA, state names appearing in prose).
-_US_LOC_ONLY = {"us"}
+# "u s" catches the punctuated "U.S." form (e.g. Ashby's "Remote U.S."), which
+# _normalize splits into two single-letter tokens.
+_US_LOC_ONLY = {"us", "u s"}
 _US_STATE_HINTS = {
     "california", "new york", "texas", "florida", "washington", "massachusetts",
     "illinois", "georgia", "colorado", "oregon", "ohio", "virginia", "michigan",
@@ -124,6 +126,12 @@ def detect_us_only_blocker(job: dict) -> str | None:
 
 
 def detect_remote(job: dict) -> bool:
+    # Trust a structured remote flag from the source API (Ashby isRemote, Lever
+    # workplaceType, Recruitee remote, …) when present. ATS location text is often
+    # just a city, so the keyword fallback alone wrongly drops real remote roles.
+    flag = job.get("is_remote")
+    if isinstance(flag, bool):
+        return flag
     hay = _haystack(job)
     return any(token in hay for token in _REMOTE_TOKENS)
 
