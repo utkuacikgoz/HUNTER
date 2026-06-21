@@ -88,19 +88,23 @@ logger = logging.getLogger("hunter")
 
 async def _scrape_all() -> list[dict]:
     """Run every enabled scraper. Skips scrapers stuck on zero-yield streaks."""
-    # ATS catalog (API) sources first — reliable and cheap — so they fill the day's
-    # fresh quota before the slower/flakier browser scrapers. Each source may return
-    # up to SOURCE_FETCH_CAP; the downstream dedup+filter trims to MAX_JOBS_PER_DAY.
+    # Order is by expected survival rate, because both the collection ceiling here
+    # and the reviewable-job budget in _classify_and_store are filled in this order.
+    # Highest-survival first: remote-only boards, then ATS sources that expose a
+    # structured remote flag (Ashby isRemote / Lever workplaceType / Recruitee /
+    # SmartRecruiters). The text-only Greenhouse catalog (no remote field → most
+    # roles read as not-remote) and the flaky browser scraper go last so they don't
+    # starve the better sources. Each source returns up to SOURCE_FETCH_CAP.
     scrapers = [
         # LinkedInScraper(headless=True),  # Disabled - session-cookie issues; kept for Phase 3 hybrid apply
-        GreenhouseSource(),
-        AshbySource(),
-        LeverSource(),
-        RecruiteeSource(),
-        SmartRecruitersSource(),
-        WeWorkRemotelySource(),
-        RemoteOKScraper(headless=True),
-        WellfoundScraper(headless=True),
+        RemoteOKScraper(headless=True),   # remote-only
+        WeWorkRemotelySource(),           # remote-only
+        AshbySource(),                    # structured isRemote / workplaceType
+        LeverSource(),                    # structured workplaceType
+        RecruiteeSource(),                # structured remote flag
+        SmartRecruitersSource(),          # structured remote flag
+        GreenhouseSource(),               # text-only remote detection (no API flag)
+        WellfoundScraper(headless=True),  # browser, fragile
     ]
     fetch_cap = max(1, SOURCE_FETCH_CAP)
     # Bound total raw collection so a quiet filter run can't OOM the box; the
@@ -159,6 +163,7 @@ async def _classify_and_store(jobs: list[dict]) -> tuple[int, dict[str, int]]:
 
     counts = {"include": 0, "flag": 0, "drop": 0}
     new_count = 0
+    reviewable = 0
     for job in jobs:
         verdict = await evaluate_job_async(job, llm_score=llm_score)
         counts[verdict.verdict] += 1
@@ -179,7 +184,12 @@ async def _classify_and_store(jobs: list[dict]) -> tuple[int, dict[str, int]]:
         )
         if job_id:
             new_count += 1
-        if new_count >= MAX_JOBS_PER_DAY:
+            if verdict.verdict != "drop":
+                reviewable += 1
+        # Cap on REVIEWABLE (include/flag) jobs, not total inserts — drops are still
+        # persisted for dedup but must not consume the day's review budget, or a
+        # high-drop source could exhaust it before the good jobs are reached.
+        if reviewable >= MAX_JOBS_PER_DAY:
             break
     return new_count, counts
 
