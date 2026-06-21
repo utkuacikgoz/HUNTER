@@ -14,7 +14,9 @@ from datetime import date
 
 from config.settings import (
     ASHBY_BOARDS,
+    ASHBY_US_BOARDS,
     GREENHOUSE_BOARDS,
+    GREENHOUSE_US_BOARDS,
     LEVER_BOARDS,
     RECRUITEE_BOARDS,
     ROLE_MATCH_KEYWORDS,
@@ -39,25 +41,38 @@ class AtsSource(ApiSource):
 
     accepts_query = False
 
-    def __init__(self, headless: bool = True, boards: list[str] | None = None):
+    def __init__(
+        self,
+        headless: bool = True,
+        boards: list[str] | None = None,
+        priority_count: int | None = None,
+    ):
         super().__init__(headless)
         self.boards = list(boards) if boards is not None else []
+        # The first `priority_count` boards are the priority tier; the remainder is
+        # only reached when the per-run cap isn't filled. Defaults to all-priority.
+        self.priority_count = len(self.boards) if priority_count is None else priority_count
 
     def _title_matches(self, title: str) -> bool:
         t = (title or "").lower()
         return any(kw in t for kw in ROLE_MATCH_KEYWORDS)
 
+    def _ordered_boards(self) -> list[str]:
+        """Priority tier first (rotated daily so its tail gets coverage over a span
+        of days), then the deprioritized tier in fixed order. The cap usually fills
+        within the priority tier, so the deprioritized tier is reached only when it
+        doesn't — keeping the review queue weighted toward priority boards."""
+        pc = max(0, min(self.priority_count, len(self.boards)))
+        priority, rest = self.boards[:pc], self.boards[pc:]
+        if priority:
+            offset = date.today().toordinal() % len(priority)
+            priority = priority[offset:] + priority[:offset]
+        return priority + rest
+
     async def scrape(self, query: str = "", location: str = "", max_results: int = 10) -> list[dict]:
         jobs: list[dict] = []
-        # The loop stops once max_results is hit, so a fixed board order would
-        # starve the tail of the list. Rotate by a daily offset so every board
-        # gets its turn near the front over a span of days.
-        boards = self.boards
-        if boards:
-            offset = date.today().toordinal() % len(boards)
-            boards = boards[offset:] + boards[:offset]
         scanned = 0
-        for board in boards:
+        for board in self._ordered_boards():
             try:
                 board_jobs = await self._fetch_board(board)
             except Exception as e:
@@ -81,7 +96,13 @@ class GreenhouseSource(AtsSource):
     platform_name = "greenhouse"
 
     def __init__(self, headless: bool = True, boards: list[str] | None = None):
-        super().__init__(headless, GREENHOUSE_BOARDS if boards is None else boards)
+        if boards is None:
+            super().__init__(
+                headless, GREENHOUSE_BOARDS + GREENHOUSE_US_BOARDS,
+                priority_count=len(GREENHOUSE_BOARDS),
+            )
+        else:
+            super().__init__(headless, boards)
 
     async def _fetch_board(self, board: str) -> list[dict]:
         url = f"https://boards-api.greenhouse.io/v1/boards/{board}/jobs?content=true"
@@ -188,7 +209,13 @@ class AshbySource(AtsSource):
     platform_name = "ashby"
 
     def __init__(self, headless: bool = True, boards: list[str] | None = None):
-        super().__init__(headless, ASHBY_BOARDS if boards is None else boards)
+        if boards is None:
+            super().__init__(
+                headless, ASHBY_BOARDS + ASHBY_US_BOARDS,
+                priority_count=len(ASHBY_BOARDS),
+            )
+        else:
+            super().__init__(headless, boards)
 
     async def _fetch_board(self, board: str) -> list[dict]:
         url = f"https://api.ashbyhq.com/posting-api/job-board/{board}"

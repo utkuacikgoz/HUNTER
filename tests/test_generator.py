@@ -49,6 +49,7 @@ class TestModelTiering:
     def test_cover_letter_uses_cover_letter_model(self, monkeypatch):
         import prompts.generator as g
         captured = {}
+        monkeypatch.setattr(g, "ANTHROPIC_API_KEY", "sk-test")  # pass the no-key guard
         monkeypatch.setattr(g, "_get_client", lambda: self._fake_client(captured))
         g.generate_cover_letter("PM", "Acme", "Build great products")
         assert captured["model"] == g.COVER_LETTER_MODEL
@@ -56,9 +57,35 @@ class TestModelTiering:
     def test_form_answer_uses_base_model(self, monkeypatch):
         import prompts.generator as g
         captured = {}
+        monkeypatch.setattr(g, "ANTHROPIC_API_KEY", "sk-test")  # pass the no-key guard
         monkeypatch.setattr(g, "_get_client", lambda: self._fake_client(captured))
         g.generate_form_answer("Why do you want to work here at this company?")
         assert captured["model"] == g.CLAUDE_MODEL
+
+
+class TestNoApiKeyFallback:
+    """With ANTHROPIC_API_KEY unset, generators skip the API and fall back cleanly."""
+
+    def test_cover_letter_falls_back_without_key(self, monkeypatch):
+        import prompts.generator as g
+
+        def _boom():
+            raise AssertionError("client must not be constructed without a key")
+
+        monkeypatch.setattr(g, "ANTHROPIC_API_KEY", "")
+        monkeypatch.setattr(g, "_get_client", _boom)
+        out = g.generate_cover_letter("PM", "Acme", "desc")
+        assert "Acme" in out  # template fallback, not an API call
+
+    def test_form_answer_empty_without_key(self, monkeypatch):
+        import prompts.generator as g
+
+        def _boom():
+            raise AssertionError("client must not be constructed without a key")
+
+        monkeypatch.setattr(g, "ANTHROPIC_API_KEY", "")
+        monkeypatch.setattr(g, "_get_client", _boom)
+        assert g.generate_form_answer("Why do you want to work here at this company?") == ""
 
 
 class TestDedash:

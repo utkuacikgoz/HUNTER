@@ -56,6 +56,8 @@ def _dedash(text: str) -> str:
 
 def generate_cover_letter(job_title: str, company: str, job_description: str = "") -> str:
     """Generate a tailored cover letter for a specific job."""
+    if not ANTHROPIC_API_KEY:
+        return _fallback_cover_letter(job_title, company)
     try:
         c = _get_client()
         safe_description = _sanitize_external_text(job_description)
@@ -126,6 +128,8 @@ def generate_form_answer(question: str, job_title: str = "", company: str = "") 
     question text isn't a real, answerable prompt."""
     if not is_answerable_question(question):
         logger.info(f"Skipping non-answerable form question: {question[:60]!r}")
+        return ""
+    if not ANTHROPIC_API_KEY:
         return ""
     try:
         c = _get_client()

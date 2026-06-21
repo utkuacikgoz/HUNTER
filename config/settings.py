@@ -73,27 +73,34 @@ ENABLE_LLM_SPONSOR_SCORING = os.getenv("ENABLE_LLM_SPONSOR_SCORING", "true").str
 # Values are board *tokens* (not display names). Defaults are live-verified
 # (2026-06-04); find a token by hitting e.g.
 # boards-api.greenhouse.io/v1/boards/{token}/jobs (200 + non-empty jobs = valid).
-# Tier-2/3 scale-ups are listed FIRST so they fill the per-run job cap before the
-# tier-1 giants (each source stops once it has enough roles). All board tokens are
-# live-verified (2026-06-04).
+# Boards are scanned in two tiers: the PRIORITY list below (EU/EMEA/global-remote,
+# sponsor-friendly) is scanned first — rotated daily so its tail gets coverage — and
+# the *_US_BOARDS list (US-only-remote giants) is only reached when the per-run cap
+# isn't already filled. This keeps the review queue weighted toward roles an
+# overseas, sponsorship-needing candidate can actually take. Tokens live-verified
+# 2026-06-04..22.
 GREENHOUSE_BOARDS = _csv_list(
     "GREENHOUSE_BOARDS",
     # tier-2/3 (fintech / crypto / marketplace / saas)
     "gocardless,form3,tide,truelayer,mercury,fireblocks,bitpanda,nansen,faire,"
     "wallapop,gigs,contentful,typeform,planetscale,"
-    # EU/EMEA-focused (live-verified 2026-06-07/08/09; hire product in EU/EMEA)
+    # EU/EMEA-focused (hire product in EU/EMEA)
     "monzo,sumup,getyourguide,doctolib,celonis,wolt,n26,hellofresh,trustpilot,"
     "skyscanner,unity3d,adyen,algolia,raisin,cleo,graphcore,freenow,consensys,"
-    # YC / well-known startups (live-verified 2026-06-09; region filter drops US-only)
+    "intercom,dataiku,"
+    # YC / well-known startups (region filter drops US-only)
     "brex,gusto,clickhouse,flexport,checkr,mixpanel,webflow,lithic,highnote,"
-    # well-known / remote-hiring (live-verified 2026-06-22; region filter + LLM
-    # sponsor scoring trim US-only roles)
-    "databricks,airbnb,dropbox,lyft,pinterest,robinhood,coinbase,asana,twilio,"
-    "affirm,marqeta,instacart,intercom,calendly,airtable,dataiku,sofi,scaleai,"
-    "samsara,twitch,chime,squarespace,reddit,upstart,betterment,peloton,"
     # tier-1
     "stripe,datadog,mongodb,canonical,cloudflare,figma,gitlab,elastic,postman,"
     "vercel,discord,mozilla,mattermost,remote",
+)
+# US-only-remote giants — scanned last (leftover cap only). Mostly post roles
+# locked to US work authorization, which the filter drops for an overseas candidate.
+GREENHOUSE_US_BOARDS = _csv_list(
+    "GREENHOUSE_US_BOARDS",
+    "databricks,airbnb,dropbox,lyft,pinterest,robinhood,coinbase,asana,twilio,"
+    "affirm,marqeta,instacart,calendly,airtable,sofi,scaleai,samsara,twitch,"
+    "chime,squarespace,reddit,upstart,betterment,peloton",
 )
 LEVER_BOARDS = _csv_list(
     "LEVER_BOARDS",
@@ -108,16 +115,18 @@ ASHBY_BOARDS = _csv_list(
     # tier-2/3
     "pleo,mollie,pennylane,sardine,taktile,swan,ramp,ledger,blockdaemon,safe,"
     "paxos,backmarket,gorgias,posthog,workos,fonoa,"
-    # EU/EMEA-focused (live-verified 2026-06-08/09)
-    "synthesia,alan,tacto,wayve,vanta,photoroom,harvey,plaid,"
-    # YC / AI-infra startups (live-verified 2026-06-09; often global/remote)
+    # EU/EMEA-focused
+    "synthesia,alan,tacto,wayve,vanta,photoroom,harvey,plaid,lovable,"
+    # YC / AI-infra startups (often global/remote)
     "zip,cohere,temporal,replit,watershed,airbyte,mux,render,baseten,neon,"
     "weaviate,pinecone,langchain,llamaindex,column,"
-    # AI labs / YC (live-verified 2026-06-22; often global/remote)
-    "openai,perplexity,cursor,character,sierra,decagon,drata,lovable,abridge,"
-    "speak,suno,crusoe,"
     # tier-1
     "notion,1password,clickup,deel,n8n,linear,zapier,supabase,buffer",
+)
+# US-only-remote AI labs / startups — scanned last (leftover cap only).
+ASHBY_US_BOARDS = _csv_list(
+    "ASHBY_US_BOARDS",
+    "openai,perplexity,cursor,character,sierra,decagon,drata,abridge,speak,suno,crusoe",
 )
 # Recruitee boards — subdomain token (https://{token}.recruitee.com/api/offers/).
 RECRUITEE_BOARDS = _csv_list("RECRUITEE_BOARDS", "bunq,sendcloud")
@@ -217,13 +226,6 @@ WEWORKREMOTELY_FEEDS = _csv_list(
     "WEWORKREMOTELY_FEEDS",
     "https://weworkremotely.com/categories/remote-product-jobs.rss",
 )
-
-# Platform URLs
-PLATFORM_URLS = {
-    "linkedin": "https://www.linkedin.com/jobs/search/",
-    "wellfound": "https://wellfound.com/jobs",
-    "remoteok": "https://remoteok.com/remote-product-manager-jobs",
-}
 
 # Resume text — loaded from file at runtime, NOT hardcoded in source.
 # The "missing resume" warning is emitted from validate_config(), not at import,

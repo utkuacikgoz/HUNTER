@@ -38,7 +38,6 @@ from scraper.ats import (
     GreenhouseSource,
     LeverSource,
     RecruiteeSource,
-    SmartRecruitersSource,
 )
 from scraper.filters import evaluate_job_async
 from scraper.remoteok import RemoteOKScraper
@@ -102,7 +101,6 @@ async def _scrape_all() -> list[dict]:
         AshbySource(),                    # structured isRemote / workplaceType
         LeverSource(),                    # structured workplaceType
         RecruiteeSource(),                # structured remote flag
-        SmartRecruitersSource(),          # structured remote flag
         GreenhouseSource(),               # text-only remote detection (no API flag)
         WellfoundScraper(headless=True),  # browser, fragile
     ]
