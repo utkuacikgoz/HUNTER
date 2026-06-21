@@ -90,6 +90,8 @@ class TestGreenhouse:
         assert j["location"] == "Remote - EU"
         assert j["url"].endswith("/acme/jobs/1")
         assert j["description"] == "Own the roadmap"  # html stripped
+        # Greenhouse has no structured remote flag → unknown (text fallback in filter).
+        assert j["is_remote"] is None
 
     async def test_non_dict_payload_yields_nothing(self, monkeypatch):
         src = GreenhouseSource(boards=["acme"])
@@ -102,6 +104,7 @@ class TestLever:
         src = LeverSource(boards=["acme"])
         payload = [
             {"text": "Group Product Manager", "categories": {"location": "London, UK"},
+             "workplaceType": "remote",
              "hostedUrl": "https://jobs.lever.co/acme/1", "descriptionPlain": "Lead products"},
             {"text": "Account Executive", "categories": {"location": "NYC"},
              "hostedUrl": "https://jobs.lever.co/acme/2", "descriptionPlain": "Sell"},
@@ -114,13 +117,25 @@ class TestLever:
         assert jobs[0]["company"] == "acme"
         assert jobs[0]["url"] == "https://jobs.lever.co/acme/1"
         assert jobs[0]["location"] == "London, UK"
+        assert jobs[0]["is_remote"] is True  # from workplaceType "remote"
+
+    async def test_workplace_type_hybrid_is_not_remote(self, monkeypatch):
+        src = LeverSource(boards=["acme"])
+        payload = [
+            {"text": "Product Manager", "categories": {"location": "Berlin"},
+             "workplaceType": "hybrid", "hostedUrl": "https://jobs.lever.co/acme/3"},
+        ]
+        _patch_get_json(monkeypatch, src, payload)
+        jobs = await src.scrape()
+        assert jobs[0]["is_remote"] is False
 
 
 class TestAshby:
     async def test_parses_filters_normalizes(self, monkeypatch):
         src = AshbySource(boards=["acme"])
         payload = {"jobs": [
-            {"title": "Principal Product Manager", "location": "Remote",
+            {"title": "Principal Product Manager", "location": "Berlin",
+             "isRemote": True, "workplaceType": "Remote",
              "jobUrl": "https://jobs.ashbyhq.com/acme/1", "descriptionPlain": "Strategy"},
             {"title": "Technical Recruiter", "location": "Remote",
              "jobUrl": "https://jobs.ashbyhq.com/acme/2", "descriptionPlain": "Hire"},
@@ -132,6 +147,18 @@ class TestAshby:
         assert jobs[0]["title"] == "Principal Product Manager"
         assert jobs[0]["platform"] == "ashby"
         assert jobs[0]["url"] == "https://jobs.ashbyhq.com/acme/1"
+        # Structured isRemote flag survives even when location is a bare city.
+        assert jobs[0]["is_remote"] is True
+
+    async def test_non_remote_workplace_type(self, monkeypatch):
+        src = AshbySource(boards=["acme"])
+        payload = {"jobs": [
+            {"title": "Product Manager", "location": "Paris", "isRemote": False,
+             "workplaceType": "Hybrid", "jobUrl": "https://jobs.ashbyhq.com/acme/3"},
+        ]}
+        _patch_get_json(monkeypatch, src, payload)
+        jobs = await src.scrape()
+        assert jobs[0]["is_remote"] is False
 
 
 class TestRecruitee:
@@ -139,6 +166,7 @@ class TestRecruitee:
         src = RecruiteeSource(boards=["acme"])
         payload = {"offers": [
             {"title": "Senior Product Manager", "location": "Amsterdam, Netherlands",
+             "remote": True,
              "careers_url": "https://acme.recruitee.com/o/spm", "description": "<p>Own it</p>"},
             {"title": "AML Analyst", "location": "Bucharest, Romania",
              "careers_url": "https://acme.recruitee.com/o/aml"},
@@ -152,6 +180,7 @@ class TestRecruitee:
         assert jobs[0]["url"] == "https://acme.recruitee.com/o/spm"
         assert jobs[0]["location"] == "Amsterdam, Netherlands"
         assert jobs[0]["description"] == "Own it"  # html stripped
+        assert jobs[0]["is_remote"] is True  # from structured remote flag
 
     async def test_location_falls_back_to_city_country(self, monkeypatch):
         src = RecruiteeSource(boards=["acme"])
@@ -192,6 +221,7 @@ class TestSmartRecruiters:
         _patch_get_json(monkeypatch, src, payload)
         jobs = await src.scrape()
         assert jobs[0]["location"] == "Remote - London, UK"
+        assert jobs[0]["is_remote"] is True
 
     async def test_id_falls_back_to_ref_tail(self, monkeypatch):
         src = SmartRecruitersSource(boards=["Acme"])

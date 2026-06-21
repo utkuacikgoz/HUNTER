@@ -43,6 +43,7 @@ from scraper.ats import (
 from scraper.filters import evaluate_job_async
 from scraper.remoteok import RemoteOKScraper
 from scraper.wellfound import WellfoundScraper
+from scraper.weworkremotely import WeWorkRemotelySource
 from telegram_bot.bot import (
     _active_apply_tasks,
     build_bot_app,
@@ -97,8 +98,9 @@ async def _scrape_all() -> list[dict]:
         LeverSource(),
         RecruiteeSource(),
         SmartRecruitersSource(),
-        WellfoundScraper(headless=True),
+        WeWorkRemotelySource(),
         RemoteOKScraper(headless=True),
+        WellfoundScraper(headless=True),
     ]
     fetch_cap = max(1, SOURCE_FETCH_CAP)
     # Bound total raw collection so a quiet filter run can't OOM the box; the

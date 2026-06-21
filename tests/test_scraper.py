@@ -43,8 +43,16 @@ class TestNormalizeJob:
 
     def test_all_keys_present(self):
         job = self.scraper._normalize_job("PM", "Co", "NYC", "$100k", "https://x.com", "desc")
-        expected_keys = {"title", "company", "location", "salary", "url", "platform", "description"}
+        expected_keys = {
+            "title", "company", "location", "salary", "url", "platform",
+            "description", "is_remote",
+        }
         assert set(job.keys()) == expected_keys
+
+    def test_is_remote_defaults_none_and_passes_through(self):
+        assert self.scraper._normalize_job("PM", "Co", "", "", "https://x.com")["is_remote"] is None
+        job = self.scraper._normalize_job("PM", "Co", "", "", "https://x.com", is_remote=True)
+        assert job["is_remote"] is True
 
 
 class TestSourceHierarchy:
@@ -63,8 +71,9 @@ class TestSourceHierarchy:
         assert not issubclass(RemoteOKScraper, BrowserSource)
         assert not hasattr(RemoteOKScraper(), "_browser")
 
-    def test_default_accepts_query(self):
-        assert RemoteOKScraper().accepts_query is True
+    def test_remoteok_is_catalog_source(self):
+        # RemoteOK is tag-driven (iterates REMOTEOK_TAGS once), not query-driven.
+        assert RemoteOKScraper().accepts_query is False
 
 
 class _FakeResp:

@@ -51,6 +51,28 @@ class TestDetectRemote:
     def test_onsite_only(self):
         assert detect_remote({"title": "PM", "location": "San Francisco, CA", "description": ""}) is False
 
+    def test_structured_flag_true_trusted_over_bare_city(self):
+        # The core bug fix: an ATS role flagged remote with only a city location
+        # (no "remote" keyword) must still read as remote.
+        assert detect_remote(
+            {"title": "PM", "location": "Berlin", "description": "", "is_remote": True}
+        ) is True
+
+    def test_structured_flag_false_trusted(self):
+        # A "remote" keyword in prose must not override an explicit not-remote flag.
+        assert detect_remote(
+            {"title": "PM", "location": "Remote-friendly office", "description": "",
+             "is_remote": False}
+        ) is False
+
+    def test_none_flag_falls_back_to_text(self):
+        assert detect_remote(
+            {"title": "PM", "location": "Remote", "description": "", "is_remote": None}
+        ) is True
+        assert detect_remote(
+            {"title": "PM", "location": "Berlin", "description": "", "is_remote": None}
+        ) is False
+
 
 class TestClassifyRegion:
     def test_emea_explicit(self):
@@ -113,6 +135,7 @@ class TestDetectCountryLockedRemote:
         "San Francisco, CA, New York, NY, Portland, OR, or Remote within Canada or United States",
         "Remote - United States",
         "Remote - US",
+        "Remote U.S.",               # punctuated form (Ashby's default)
         "Remote (USA only)",
         "Remote, Canada",
     ]
@@ -210,6 +233,33 @@ class TestEvaluateJob:
         })
         assert v.verdict == "drop"
         assert v.is_remote is False
+
+    def test_structured_remote_flag_rescues_bare_city_role(self):
+        # The core bug fix end-to-end: an ATS role with a bare-city location but a
+        # structured is_remote=True flag must NOT drop as "not marked remote".
+        v = evaluate_job({
+            "title": "Senior PM",
+            "company": "FooCorp",
+            "location": "Berlin",
+            "description": "EU product team.",
+            "is_remote": True,
+        })
+        assert v.verdict == "flag"
+        assert v.is_remote is True
+        assert v.region == "eu"
+
+    def test_ashby_remote_us_role_drops_as_us_locked(self):
+        # Ashby's "Remote U.S." + isRemote=True: now recognized as US-locked so an
+        # overseas candidate isn't flooded with roles they can't take.
+        v = evaluate_job({
+            "title": "Staff Product Manager",
+            "company": "Vanta",
+            "location": "Remote U.S.",
+            "description": "",
+            "is_remote": True,
+        })
+        assert v.verdict == "drop"
+        assert "locked to US/Canada" in v.reasons[0]
 
     def test_allowlist_overrides_unknown_region(self):
         v = evaluate_job({

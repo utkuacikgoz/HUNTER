@@ -30,14 +30,14 @@ COVER_LETTER_MODEL = os.getenv("COVER_LETTER_MODEL", "claude-opus-4-8")
 TARGET_ROLE = os.getenv("TARGET_ROLE", "Senior Product Manager")
 MIN_SALARY = int(os.getenv("MIN_SALARY", "80000"))
 LOCATIONS = [loc.strip() for loc in os.getenv("LOCATIONS", "EMEA,Remote,US").split(",") if loc.strip()]
-MAX_JOBS_PER_DAY = int(os.getenv("MAX_JOBS_PER_DAY", "50"))
+MAX_JOBS_PER_DAY = int(os.getenv("MAX_JOBS_PER_DAY", "80"))
 # How many of SEARCH_QUERIES to run per scrape (0 = all). Previously hardcoded to 3.
 MAX_QUERIES_PER_RUN = int(os.getenv("MAX_QUERIES_PER_RUN", "0"))
-# Max roles to pull from a SINGLE source per run. Defaults to MAX_JOBS_PER_DAY so a
-# single rich board (e.g. a Greenhouse catalog with 20 PM roles) isn't throttled to
-# a tiny per-source slice — the target-driven loop then dedups/filters down to the
-# day's fresh quota. Raise for more breadth, lower to rate-limit a noisy source.
-SOURCE_FETCH_CAP = int(os.getenv("SOURCE_FETCH_CAP", str(MAX_JOBS_PER_DAY)))
+# Max roles to pull from a SINGLE source per run. Set above MAX_JOBS_PER_DAY so a
+# catalog source keeps scanning boards past the day's quota (more boards reached =
+# more breadth); the target-driven loop then dedups/filters down to the day's fresh
+# quota. Raise for more breadth, lower to rate-limit a noisy source.
+SOURCE_FETCH_CAP = int(os.getenv("SOURCE_FETCH_CAP", "150"))
 
 
 def _csv_set(env_name: str, default: str) -> set[str]:
@@ -63,10 +63,11 @@ SPONSOR_FRIENDLY_COMPANIES = _csv_set(
     "Stripe,GitLab,Automattic,Spotify,Klarna,Wise,Remote,Deel,Toptal,Doist,Buffer,Zapier,"
     "Hotjar,Canonical,Elastic,HashiCorp,Sourcegraph,Vercel,Supabase,Linear,Notion,Figma,"
     "Atlassian,Mozilla,Shopify,Discord,Cloudflare,DigitalOcean,n8n,Mattermost,GitHub,"
-    "MongoDB,Auth0,Postman,Snyk,Datadog,Miro,Loom,1Password,ClickUp",
+    "MongoDB,Auth0,Postman,Snyk,Datadog,Miro,Loom,1Password,ClickUp,"
+    "Databricks,Intercom,Dataiku",
 )
 SPONSOR_BLOCKLIST_COMPANIES = _csv_set("SPONSOR_BLOCKLIST_COMPANIES", "")
-ENABLE_LLM_SPONSOR_SCORING = os.getenv("ENABLE_LLM_SPONSOR_SCORING", "false").strip().lower() in {"1", "true", "yes", "y"}
+ENABLE_LLM_SPONSOR_SCORING = os.getenv("ENABLE_LLM_SPONSOR_SCORING", "true").strip().lower() in {"1", "true", "yes", "y"}
 
 # --- ATS catalog sources (Greenhouse / Lever / Ashby) ---
 # Values are board *tokens* (not display names). Defaults are live-verified
@@ -85,6 +86,11 @@ GREENHOUSE_BOARDS = _csv_list(
     "skyscanner,unity3d,adyen,algolia,raisin,cleo,graphcore,freenow,consensys,"
     # YC / well-known startups (live-verified 2026-06-09; region filter drops US-only)
     "brex,gusto,clickhouse,flexport,checkr,mixpanel,webflow,lithic,highnote,"
+    # well-known / remote-hiring (live-verified 2026-06-22; region filter + LLM
+    # sponsor scoring trim US-only roles)
+    "databricks,airbnb,dropbox,lyft,pinterest,robinhood,coinbase,asana,twilio,"
+    "affirm,marqeta,instacart,intercom,calendly,airtable,dataiku,sofi,scaleai,"
+    "samsara,twitch,chime,squarespace,reddit,upstart,betterment,peloton,"
     # tier-1
     "stripe,datadog,mongodb,canonical,cloudflare,figma,gitlab,elastic,postman,"
     "vercel,discord,mozilla,mattermost,remote",
@@ -93,7 +99,9 @@ LEVER_BOARDS = _csv_list(
     "LEVER_BOARDS",
     # live-verified 2026-06-08/09: mistral/contentsquare/younited + YC (metabase/finch)
     "qonto,vestiairecollective,spotify,toptal,mistral,contentsquare,younited,"
-    "metabase,finch",
+    "metabase,finch,"
+    # live-verified 2026-06-22
+    "matchgroup,swordhealth",
 )
 ASHBY_BOARDS = _csv_list(
     "ASHBY_BOARDS",
@@ -105,6 +113,9 @@ ASHBY_BOARDS = _csv_list(
     # YC / AI-infra startups (live-verified 2026-06-09; often global/remote)
     "zip,cohere,temporal,replit,watershed,airbyte,mux,render,baseten,neon,"
     "weaviate,pinecone,langchain,llamaindex,column,"
+    # AI labs / YC (live-verified 2026-06-22; often global/remote)
+    "openai,perplexity,cursor,character,sierra,decagon,drata,lovable,abridge,"
+    "speak,suno,crusoe,"
     # tier-1
     "notion,1password,clickup,deel,n8n,linear,zapier,supabase,buffer",
 )
@@ -193,6 +204,19 @@ SEARCH_QUERIES = [
     "Product Lead",
     "Head of Product",
 ]
+
+# RemoteOK is tag-driven: its API is /api?tag=<tag>. Multi-word SEARCH_QUERIES turn
+# into dead tags (e.g. "senior-product-manager"), so RemoteOK uses these real tags
+# instead. The PM title filter (ROLE_MATCH_KEYWORDS) still trims the broad "product"
+# tag down to manager-level roles.
+REMOTEOK_TAGS = _csv_list("REMOTEOK_TAGS", "product-manager,product")
+
+# We Work Remotely category RSS feeds (remote-only). The Product feed is broad —
+# the PM title filter trims it to manager-level roles.
+WEWORKREMOTELY_FEEDS = _csv_list(
+    "WEWORKREMOTELY_FEEDS",
+    "https://weworkremotely.com/categories/remote-product-jobs.rss",
+)
 
 # Platform URLs
 PLATFORM_URLS = {
