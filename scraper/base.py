@@ -56,7 +56,14 @@ class JobSource(ABC):
         """Return list of job dicts: {title, company, location, salary, url, description}"""
         ...
 
-    def _normalize_job(self, title, company, location, salary, url, description=""):
+    def _normalize_job(self, title, company, location, salary, url, description="", is_remote=None):
+        """Normalize a scraped job into the common dict shape.
+
+        `is_remote` carries a structured remote flag straight from a source API
+        (Ashby `isRemote`, Lever `workplaceType`, Recruitee `remote`, …) when the
+        source knows it. `None` means "unknown" — the filter then falls back to
+        keyword-matching the location/description text.
+        """
         return {
             "title": (title or "").strip(),
             "company": (company or "").strip(),
@@ -65,6 +72,7 @@ class JobSource(ABC):
             "url": (url or "").strip(),
             "platform": self.platform_name,
             "description": (description or "").strip(),
+            "is_remote": is_remote,
         }
 
 
@@ -175,3 +183,30 @@ class ApiSource(JobSource):
             except Exception as e:
                 logger.error(f"{self.platform_name}: invalid JSON from {url}: {e}")
                 return None
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=2, max=30),
+        retry=retry_if_exception_type((aiohttp.ClientError, TimeoutError)),
+        reraise=True,
+    )
+    async def _get_text(self, url: str, *, params: dict | None = None, headers: dict | None = None):
+        """GET and return the response body as text (e.g. RSS/XML feeds).
+
+        Returns the body string, or None on a non-200 response. Raises only after
+        repeated transport failures (tenacity reraise).
+        """
+        assert self._session is not None, "session not started — use 'async with source:'"
+        hdrs = {"User-Agent": random.choice(USER_AGENTS)}
+        if headers:
+            hdrs.update(headers)
+        async with self._session.get(
+            url, params=params, headers=hdrs, timeout=aiohttp.ClientTimeout(total=15)
+        ) as resp:
+            if resp.status == 429:
+                logger.warning(f"{self.platform_name}: rate limited (429), retrying...")
+                raise aiohttp.ClientError("Rate limited")
+            if resp.status != 200:
+                logger.warning(f"{self.platform_name}: status {resp.status} for {url}")
+                return None
+            return await resp.text()

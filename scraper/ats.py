@@ -10,6 +10,7 @@ import html
 import logging
 import re
 from abc import abstractmethod
+from datetime import date
 
 from config.settings import (
     ASHBY_BOARDS,
@@ -48,17 +49,26 @@ class AtsSource(ApiSource):
 
     async def scrape(self, query: str = "", location: str = "", max_results: int = 10) -> list[dict]:
         jobs: list[dict] = []
-        for board in self.boards:
+        # The loop stops once max_results is hit, so a fixed board order would
+        # starve the tail of the list. Rotate by a daily offset so every board
+        # gets its turn near the front over a span of days.
+        boards = self.boards
+        if boards:
+            offset = date.today().toordinal() % len(boards)
+            boards = boards[offset:] + boards[:offset]
+        scanned = 0
+        for board in boards:
             try:
                 board_jobs = await self._fetch_board(board)
             except Exception as e:
                 logger.warning(f"{self.platform_name}: board {board!r} failed: {e}")
                 continue
+            scanned += 1
             jobs.extend(board_jobs)
             if len(jobs) >= max_results:
                 break
         logger.info(
-            f"{self.platform_name}: {len(jobs)} matching role(s) from {len(self.boards)} board(s)"
+            f"{self.platform_name}: {len(jobs)} matching role(s) from {scanned}/{len(self.boards)} board(s)"
         )
         return jobs[:max_results]
 
@@ -111,8 +121,9 @@ class LeverSource(AtsSource):
             loc = cats.get("location", "") or ""
             url_j = j.get("hostedUrl", "") or j.get("applyUrl", "")
             desc = j.get("descriptionPlain", "") or ""
+            is_remote = str(j.get("workplaceType", "")).lower() == "remote"
             if title and url_j:
-                out.append(self._normalize_job(title, board, loc, "", url_j, desc[:500]))
+                out.append(self._normalize_job(title, board, loc, "", url_j, desc[:500], is_remote))
         return out
 
 
@@ -137,8 +148,9 @@ class RecruiteeSource(AtsSource):
             )
             url_j = j.get("careers_url") or j.get("careers_apply_url", "")
             desc = _strip_html(j.get("description", ""))
+            is_remote = bool(j.get("remote"))
             if title and url_j:
-                out.append(self._normalize_job(title, board, loc, "", url_j, desc[:500]))
+                out.append(self._normalize_job(title, board, loc, "", url_j, desc[:500], is_remote))
         return out
 
 
@@ -161,13 +173,14 @@ class SmartRecruitersSource(AtsSource):
             loc_obj = j.get("location") or {}
             parts = [loc_obj.get("city"), loc_obj.get("country")]
             loc = loc_obj.get("fullLocation") or ", ".join(p for p in parts if p)
-            if loc_obj.get("remote"):
+            is_remote = bool(loc_obj.get("remote"))
+            if is_remote:
                 loc = f"Remote - {loc}" if loc else "Remote"
             # The list API omits the public apply URL; build it from the posting id.
             posting_id = j.get("id") or (j.get("ref", "").rstrip("/").rsplit("/", 1)[-1])
             url_j = f"https://jobs.smartrecruiters.com/{board}/{posting_id}" if posting_id else ""
             if title and url_j:
-                out.append(self._normalize_job(title, board, loc, "", url_j, ""))
+                out.append(self._normalize_job(title, board, loc, "", url_j, "", is_remote))
         return out
 
 
@@ -190,6 +203,7 @@ class AshbySource(AtsSource):
             loc = j.get("location", "") or ""
             url_j = j.get("jobUrl", "") or j.get("applyUrl", "")
             desc = j.get("descriptionPlain", "") or _strip_html(j.get("descriptionHtml", ""))
+            is_remote = bool(j.get("isRemote")) or str(j.get("workplaceType", "")).lower() == "remote"
             if title and url_j:
-                out.append(self._normalize_job(title, board, loc, "", url_j, desc[:500]))
+                out.append(self._normalize_job(title, board, loc, "", url_j, desc[:500], is_remote))
         return out
