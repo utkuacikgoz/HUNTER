@@ -232,3 +232,50 @@ class TestSmartRecruiters:
         _patch_get_json(monkeypatch, src, payload)
         jobs = await src.scrape()
         assert jobs[0]["url"] == "https://jobs.smartrecruiters.com/Acme/999"
+
+
+class TestBoardTiering:
+    """Priority (EU/global) boards are scanned before the US-only-remote tail."""
+
+    def test_greenhouse_combines_tiers_with_priority_count(self):
+        from config.settings import GREENHOUSE_BOARDS, GREENHOUSE_US_BOARDS
+        src = GreenhouseSource()
+        assert src.priority_count == len(GREENHOUSE_BOARDS)
+        assert src.boards == GREENHOUSE_BOARDS + GREENHOUSE_US_BOARDS
+        # A US-only giant sits in the deprioritized tail, not the priority tier.
+        assert "databricks" in GREENHOUSE_US_BOARDS
+        assert src.boards.index("databricks") >= src.priority_count
+
+    def test_ashby_us_tier_is_deprioritized(self):
+        from config.settings import ASHBY_BOARDS, ASHBY_US_BOARDS
+        src = AshbySource()
+        assert src.priority_count == len(ASHBY_BOARDS)
+        assert "openai" in ASHBY_US_BOARDS
+        assert src.boards.index("openai") >= src.priority_count
+
+    def test_explicit_boards_default_to_all_priority(self):
+        src = GreenhouseSource(boards=["a", "b"])
+        assert src.priority_count == 2  # no US tier when boards passed explicitly
+
+    def test_ordered_boards_priority_first_rest_fixed(self):
+        src = GreenhouseSource(boards=["p1", "p2", "us1", "us2"])
+        src.priority_count = 2
+        ordered = src._ordered_boards()
+        assert set(ordered[:2]) == {"p1", "p2"}   # priority tier (daily-rotated)
+        assert ordered[2:] == ["us1", "us2"]      # deprioritized tier, fixed order
+
+    async def test_deprioritized_tier_skipped_when_cap_filled(self, monkeypatch):
+        src = GreenhouseSource(boards=["p1", "p2", "us1"])
+        src.priority_count = 2
+        fetched: list[str] = []
+
+        async def fake_fetch(board):
+            fetched.append(board)
+            return [{"title": "Product Manager", "company": board, "location": "Remote",
+                     "url": f"https://x/{board}", "platform": "greenhouse", "is_remote": True}]
+
+        monkeypatch.setattr(src, "_fetch_board", fake_fetch)
+        jobs = await src.scrape(max_results=2)
+        # The 2 priority boards fill the cap, so the US board is never fetched.
+        assert "us1" not in fetched
+        assert len(jobs) == 2
