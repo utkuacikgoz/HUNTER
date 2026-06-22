@@ -7,8 +7,8 @@ PM title filter trims the broad "product" tag down to manager-level roles.
 """
 import logging
 
-from config.settings import REMOTEOK_TAGS, ROLE_MATCH_KEYWORDS
-from scraper.base import ApiSource
+from config.settings import REMOTEOK_TAGS
+from scraper.base import ApiSource, matches_role_title
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +18,7 @@ class RemoteOKScraper(ApiSource):
     accepts_query = False
 
     def _title_matches(self, title: str) -> bool:
-        t = (title or "").lower()
-        return any(kw in t for kw in ROLE_MATCH_KEYWORDS)
+        return matches_role_title(title)
 
     async def scrape(self, query: str = "", location: str = "", max_results: int = 10) -> list[dict]:
         jobs: list[dict] = []

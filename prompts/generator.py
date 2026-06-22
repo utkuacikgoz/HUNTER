@@ -12,6 +12,7 @@ from config.settings import (
     CLAUDE_MODEL,
     COVER_LETTER_MODEL,
     RESUME_TEXT,
+    SPONSOR_MODEL,
 )
 
 logger = logging.getLogger(__name__)
@@ -177,7 +178,9 @@ async def score_sponsor_signal(company: str, description: str) -> dict:
         return {"verdict": "unclear", "reasons": "no API key"}
 
     safe_company = _sanitize_external_text(company, max_len=200)
-    safe_desc = _sanitize_external_text(description, max_len=4000)
+    # Sponsor signals ("visa sponsorship", "US only", "worldwide") are short phrases; 2k
+    # chars is plenty for the classifier and roughly halves input tokens vs the full JD.
+    safe_desc = _sanitize_external_text(description, max_len=2000)
 
     prompt = (
         "Decide whether the following job posting indicates the company is willing to "
@@ -198,7 +201,7 @@ async def score_sponsor_signal(company: str, description: str) -> dict:
     def _call() -> dict:
         c = _get_client()
         response = c.messages.create(
-            model=CLAUDE_MODEL,
+            model=SPONSOR_MODEL,
             max_tokens=120,
             system=(
                 "You are a strict classifier. Output one JSON object only, no commentary. "

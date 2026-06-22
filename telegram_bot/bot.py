@@ -14,7 +14,7 @@ from telegram.ext import (
 )
 
 from applicant.engine import apply_to_single_job
-from config.settings import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, VELOCITY_HOT_THRESHOLD
+from config.settings import AUTO_APPLY_PLATFORMS, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 from tracker.database import (
     approve_job,
     get_all_applied_jobs,
@@ -33,23 +33,13 @@ from tracker.database import (
 logger = logging.getLogger(__name__)
 
 
-def truncate(text: str, max_len: int = 100) -> str:
-    return text[:max_len] + "..." if len(text) > max_len else text
-
-
-_VERDICT_BADGE = {
-    "include": "✅ Sponsor-friendly",
-    "flag": "🟡 Unclear sponsor — review",
-    "drop": "⛔ Disqualified",
-}
+# Only the confident "Sponsor-friendly" badge is worth showing. Flagged/unclear jobs get no
+# sponsorship line (don't claim what we're unsure of); dropped jobs are never sent.
+_VERDICT_BADGE = {"include": "✅ Sponsor-friendly"}
 _REGION_LABEL = {"us": "US", "eu": "EU", "emea": "EMEA", "other": "Other", "unknown": "?"}
 
 
-def format_job_message(
-    job: dict,
-    index: int = 0,
-    velocity: dict[str, int] | None = None,
-) -> str:
+def format_job_message(job: dict, index: int = 0) -> str:
     salary_line = f"💰 {_escape_md(job['salary'])}\n" if job.get("salary") else ""
     escaped_url = _escape_md(job['url'])
     sep = '─' * 30
@@ -62,17 +52,9 @@ def format_job_message(
     flag_line = f"{_escape_md(badge)}\n" if badge else ""
     region_line = f"🌍 {_escape_md(f'{region} · {remote_tag}')}\n" if verdict else ""
 
-    velocity_line = ""
-    if velocity:
-        company_key = (job.get("company") or "").strip().lower()
-        n = velocity.get(company_key, 0)
-        if n >= VELOCITY_HOT_THRESHOLD:
-            velocity_line = f"{_escape_md(f'🔥 {n} open roles · hiring fast')}\n"
-
     return (
         f"{sep}\n"
         f"{flag_line}"
-        f"{velocity_line}"
         f"🔹 *{idx}\\. {_escape_md(job['title'])}*\n"
         f"🏢 {_escape_md(job['company'])}\n"
         f"📍 {_escape_md(job['location'] or 'Not specified')}\n"
@@ -81,6 +63,21 @@ def format_job_message(
         f"🌐 {_escape_md(job['platform'].capitalize())}\n"
         f"🔗 [Apply Link]({escaped_url})\n"
     )
+
+
+def _review_keyboard(job: dict) -> InlineKeyboardMarkup:
+    """Auto-applyable sources get Approve/Skip + View Job. Sources we can't auto-apply to
+    (RemoteOK/WeWorkRemotely/Recruitee/SmartRecruiters) get only the apply link — Approve
+    would queue a submit that can't run for them."""
+    if (job.get("platform") or "").lower() in AUTO_APPLY_PLATFORMS:
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Approve", callback_data=f"approve_{job['id']}"),
+                InlineKeyboardButton("❌ Skip", callback_data=f"reject_{job['id']}"),
+            ],
+            [InlineKeyboardButton("🔗 View Job", url=job["url"])],
+        ])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔗 View Job", url=job["url"])]])
 
 
 def _record_filter_outcome(job: dict, decision: str) -> None:
@@ -106,15 +103,8 @@ def _escape_md(text: str) -> str:
     return text
 
 
-async def send_jobs_batch(
-    jobs: list[dict],
-    velocity: dict[str, int] | None = None,
-) -> None:
-    """Send a batch of jobs to the Telegram channel for review.
-
-    `velocity` is an optional {company_lowercase: open_role_count} dict used to
-    surface 🔥 badges on companies that are hiring aggressively.
-    """
+async def send_jobs_batch(jobs: list[dict]) -> None:
+    """Send a batch of jobs to the Telegram channel for review."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logger.error("Telegram credentials not configured")
         return
@@ -139,17 +129,8 @@ async def send_jobs_batch(
 
     for i, job in enumerate(jobs, 1):
         try:
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("✅ Approve", callback_data=f"approve_{job['id']}"),
-                    InlineKeyboardButton("❌ Skip", callback_data=f"reject_{job['id']}"),
-                ],
-                [
-                    InlineKeyboardButton("🔗 View Job", url=job["url"]),
-                ],
-            ])
-
-            text = format_job_message(job, i, velocity=velocity)
+            keyboard = _review_keyboard(job)
+            text = format_job_message(job, i)
             await bot.send_message(
                 chat_id=TELEGRAM_CHAT_ID,
                 text=text,
