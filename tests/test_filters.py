@@ -159,9 +159,18 @@ class TestDetectCountryLockedRemote:
         assert detect_country_locked_remote({"location": location}) is None
 
     def test_onsite_us_is_not_locked_remote(self):
-        # On-site (no remote token) isn't a "locked remote" — handled by the
-        # not-remote drop instead.
+        # On-site (no remote token, no is_remote flag) isn't a "locked remote" — handled
+        # by the not-remote drop instead.
         assert detect_country_locked_remote({"location": "San Francisco, CA"}) is None
+
+    def test_structured_remote_us_cities_is_locked(self):
+        # The Figma case: structured is_remote=True with a bare US-cities location (no
+        # literal "remote" word) is still US-locked for an overseas candidate.
+        job = {
+            "location": "San Francisco, CA, New York, NY, United States",
+            "is_remote": True,
+        }
+        assert detect_country_locked_remote(job) is not None
 
     def test_us_based_in_title_is_locked(self):
         # The Toptal case: "US-Based" in the title with a non-US-locked location.
@@ -289,6 +298,20 @@ class TestEvaluateJob:
             "company": "Cloudflare",
             "location": "Remote - US",
             "description": "",
+        })
+        assert v.verdict == "drop"
+        assert "locked to US/Canada" in v.reasons[0]
+
+    def test_structured_us_remote_drops_even_for_allowlist_company(self):
+        # The Figma card from production: sponsor-friendly company, structured
+        # is_remote=True, but the location is US cities only → US-remote, which an
+        # overseas candidate can't take. Must drop despite the allowlist.
+        v = evaluate_job({
+            "title": "Product Manager, CMS",
+            "company": "figma",
+            "location": "San Francisco, CA, New York, NY, United States",
+            "description": "",
+            "is_remote": True,
         })
         assert v.verdict == "drop"
         assert "locked to US/Canada" in v.reasons[0]

@@ -9,6 +9,7 @@ of `BrowserSource` for backward compatibility with existing scrapers and tests.
 import asyncio
 import logging
 import random
+import re
 from abc import ABC, abstractmethod
 from urllib.parse import urlparse
 
@@ -18,6 +19,8 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 from config.settings import (
     PROXY_URL,
+    ROLE_EXCLUDE_KEYWORDS,
+    ROLE_MATCH_KEYWORDS,
     SCRAPE_DELAY_MAX,
     SCRAPE_DELAY_MIN,
     USER_AGENTS,
@@ -26,6 +29,20 @@ from config.settings import (
 logger = logging.getLogger(__name__)
 
 _BLOCKED_PROXY_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "169.254.169.254", "metadata.google.internal"}
+
+_TITLE_NON_ALNUM = re.compile(r"[^a-z0-9]+")
+
+
+def matches_role_title(title: str) -> bool:
+    """Keep a posting only if its title contains a target role keyword AND no seniority
+    exclusion. Includes are plain substrings (ROLE_MATCH_KEYWORDS holds multi-word phrases);
+    excludes are word-boundary matched so "intern" doesn't drop "International Product Manager".
+    """
+    t = (title or "").lower()
+    if not any(kw in t for kw in ROLE_MATCH_KEYWORDS):
+        return False
+    norm = f" {_TITLE_NON_ALNUM.sub(' ', t).strip()} "
+    return not any(f" {bad} " in norm for bad in ROLE_EXCLUDE_KEYWORDS)
 
 
 class JobSource(ABC):

@@ -13,6 +13,7 @@ scheduled maintenance check. Stdlib only — no project imports beyond settings.
 import argparse
 import concurrent.futures
 import json
+import re
 import sys
 import urllib.request
 
@@ -21,6 +22,7 @@ from config.settings import (
     GREENHOUSE_BOARDS,
     LEVER_BOARDS,
     RECRUITEE_BOARDS,
+    ROLE_EXCLUDE_KEYWORDS,
     ROLE_MATCH_KEYWORDS,
     SMARTRECRUITERS_COMPANIES,
 )
@@ -35,8 +37,13 @@ def _get(url: str):
 
 
 def _is_pm(title: str) -> bool:
+    # Mirrors scraper.base.matches_role_title (kept inline so this standalone script
+    # doesn't pull in the Playwright-importing scraper package).
     t = (title or "").lower()
-    return any(kw in t for kw in ROLE_MATCH_KEYWORDS)
+    if not any(kw in t for kw in ROLE_MATCH_KEYWORDS):
+        return False
+    norm = f" {re.sub(r'[^a-z0-9]+', ' ', t).strip()} "
+    return not any(f" {bad} " in norm for bad in ROLE_EXCLUDE_KEYWORDS)
 
 
 # Each checker returns (total_jobs, pm_role_count). Raises on a dead board.

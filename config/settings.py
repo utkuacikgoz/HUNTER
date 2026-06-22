@@ -20,8 +20,11 @@ LINKEDIN_SESSION_COOKIE = os.getenv("LINKEDIN_SESSION_COOKIE", "")
 
 # --- Anthropic Claude ---
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-# Model for high-volume/cheap tasks: form answers + sponsor scoring. Override via env.
+# Model for form answers (submitted in applications — keep quality up). Override via env.
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+# Sponsor scoring is a strict yes/no/unclear JSON classifier run on most flagged jobs every
+# hunt — the textbook cheap-model task. Haiku is ~3x cheaper than Sonnet here. Override via env.
+SPONSOR_MODEL = os.getenv("SPONSOR_MODEL", "claude-haiku-4-5")
 # Cover letters represent you to employers and are low-volume (once per apply), so
 # use the strongest model by default. Override via env.
 COVER_LETTER_MODEL = os.getenv("COVER_LETTER_MODEL", "claude-opus-4-8")
@@ -31,6 +34,9 @@ TARGET_ROLE = os.getenv("TARGET_ROLE", "Senior Product Manager")
 MIN_SALARY = int(os.getenv("MIN_SALARY", "80000"))
 LOCATIONS = [loc.strip() for loc in os.getenv("LOCATIONS", "EMEA,Remote,US").split(",") if loc.strip()]
 MAX_JOBS_PER_DAY = int(os.getenv("MAX_JOBS_PER_DAY", "80"))
+# How many jobs to classify concurrently. The sponsor-scoring LLM call is a network
+# round-trip, so scoring a batch in parallel cuts the classify phase several-fold.
+CLASSIFY_CONCURRENCY = int(os.getenv("CLASSIFY_CONCURRENCY", "8"))
 # How many of SEARCH_QUERIES to run per scrape (0 = all). Previously hardcoded to 3.
 MAX_QUERIES_PER_RUN = int(os.getenv("MAX_QUERIES_PER_RUN", "0"))
 # Max roles to pull from a SINGLE source per run. Set above MAX_JOBS_PER_DAY so a
@@ -61,12 +67,14 @@ CANDIDATE_WORK_REGIONS = _csv_set("CANDIDATE_WORK_REGIONS", "emea,eu")
 SPONSOR_FRIENDLY_COMPANIES = _csv_set(
     "SPONSOR_FRIENDLY_COMPANIES",
     "Stripe,GitLab,Automattic,Spotify,Klarna,Wise,Remote,Deel,Toptal,Doist,Buffer,Zapier,"
-    "Hotjar,Canonical,Elastic,HashiCorp,Sourcegraph,Vercel,Supabase,Linear,Notion,Figma,"
+    "Hotjar,Elastic,HashiCorp,Sourcegraph,Vercel,Supabase,Linear,Notion,Figma,"
     "Atlassian,Mozilla,Shopify,Discord,Cloudflare,DigitalOcean,n8n,Mattermost,GitHub,"
     "MongoDB,Auth0,Postman,Snyk,Datadog,Miro,Loom,1Password,ClickUp,"
     "Databricks,Intercom,Dataiku",
 )
-SPONSOR_BLOCKLIST_COMPANIES = _csv_set("SPONSOR_BLOCKLIST_COMPANIES", "")
+# Companies to always drop. Matched against the exact lowercased company string, so list
+# name variants (OpenAI posts as "OpenAI" / "Open AI" / "Open-AI").
+SPONSOR_BLOCKLIST_COMPANIES = _csv_set("SPONSOR_BLOCKLIST_COMPANIES", "canonical,openai,open-ai,open ai")
 ENABLE_LLM_SPONSOR_SCORING = os.getenv("ENABLE_LLM_SPONSOR_SCORING", "true").strip().lower() in {"1", "true", "yes", "y"}
 
 # --- ATS catalog sources (Greenhouse / Lever / Ashby) ---
@@ -91,7 +99,7 @@ GREENHOUSE_BOARDS = _csv_list(
     # YC / well-known startups (region filter drops US-only)
     "brex,gusto,clickhouse,flexport,checkr,mixpanel,webflow,lithic,highnote,"
     # tier-1
-    "stripe,datadog,mongodb,canonical,cloudflare,figma,gitlab,elastic,postman,"
+    "stripe,datadog,mongodb,cloudflare,figma,gitlab,elastic,postman,"
     "vercel,discord,mozilla,mattermost,remote",
 )
 # US-only-remote giants — scanned last (leftover cap only). Mostly post roles
@@ -126,7 +134,7 @@ ASHBY_BOARDS = _csv_list(
 # US-only-remote AI labs / startups — scanned last (leftover cap only).
 ASHBY_US_BOARDS = _csv_list(
     "ASHBY_US_BOARDS",
-    "openai,perplexity,cursor,character,sierra,decagon,drata,abridge,speak,suno,crusoe",
+    "perplexity,cursor,character,sierra,decagon,drata,abridge,speak,suno,crusoe",
 )
 # Recruitee boards — subdomain token (https://{token}.recruitee.com/api/offers/).
 RECRUITEE_BOARDS = _csv_list("RECRUITEE_BOARDS", "bunq,sendcloud")
@@ -145,6 +153,17 @@ ROLE_MATCH_KEYWORDS = _csv_list(
     "senior product manager,staff product manager,technical product manager,"
     "platform product manager",
 )
+# Titles containing one of these (whole-word match) are dropped even if they also match a
+# ROLE_MATCH_KEYWORD — the candidate wants senior+ roles. Matched word-boundary-safe so
+# "intern" doesn't kill "International Product Manager".
+ROLE_EXCLUDE_KEYWORDS = _csv_list(
+    "ROLE_EXCLUDE_KEYWORDS",
+    "junior,jr,associate,intern,apprentice,working student,graduate,"
+    "entry level,entry-level,trainee,co-op,student",
+)
+# Platforms applicant/engine.py can drive a browser to auto-submit. Sources outside this set
+# (RemoteOK / WeWorkRemotely / Recruitee / SmartRecruiters) are apply-link-only.
+AUTO_APPLY_PLATFORMS = {"greenhouse", "lever", "ashby", "wellfound", "linkedin"}
 
 # --- Scraper health / selector overrides ---
 # Comma-separated Playwright selectors tried in order. Add new variants as Wellfound DOM drifts.

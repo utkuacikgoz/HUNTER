@@ -152,7 +152,11 @@ def detect_country_locked_remote(job: dict) -> str | None:
     if _has(ntitle, _TITLE_US_LOCK_TOKENS):
         return (job.get("title") or "").strip()
     nloc = _normalize(job.get("location"))
-    if not _has(nloc, _REMOTE_TOKENS):
+    # A structured is_remote flag (Ashby/Lever/Greenhouse) counts as a remote signal even
+    # when the location text is bare US cities with no literal "remote" word (e.g.
+    # "San Francisco, CA • New York, NY • United States") — those US-remote roles still
+    # won't take an overseas hire.
+    if not (detect_remote(job) or _has(nloc, _REMOTE_TOKENS)):
         return None
     locked_to_us_ca = (
         _has(nloc, _US_TOKENS)
