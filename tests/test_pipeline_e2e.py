@@ -52,7 +52,7 @@ async def test_hunt_classifies_persists_and_dispatches(temp_db, monkeypatch):
 
     captured = {}
 
-    async def fake_send_jobs_batch(pending, velocity=None):
+    async def fake_send_jobs_batch(pending):
         captured["pending"] = pending
 
     monkeypatch.setattr(main, "_scrape_all", fake_scrape_all)
@@ -105,7 +105,7 @@ async def test_drops_do_not_consume_review_budget(temp_db, monkeypatch):
 
     captured = {}
 
-    async def fake_send_jobs_batch(pending, velocity=None):
+    async def fake_send_jobs_batch(pending):
         captured["pending"] = pending
 
     monkeypatch.setattr(main, "_scrape_all", fake_scrape_all)

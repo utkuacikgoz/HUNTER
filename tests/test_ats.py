@@ -59,6 +59,16 @@ class TestAtsCommon:
         assert not s._title_matches("Senior Product Designer, Design Systems")
         assert not s._title_matches("Product Marketing Manager")
 
+    def test_title_match_drops_junior_seniority(self):
+        s = GreenhouseSource(boards=[])
+        assert not s._title_matches("Junior Product Manager")
+        assert not s._title_matches("Associate Product Manager")
+        assert not s._title_matches("Product Management Intern")
+        assert not s._title_matches("Graduate Product Manager")
+        # The intern-substring guard: "International" must survive.
+        assert s._title_matches("International Product Manager")
+        assert s._title_matches("Senior Product Manager")
+
     async def test_board_failure_is_skipped(self, monkeypatch):
         src = GreenhouseSource(boards=["a", "b"])
 
@@ -250,8 +260,10 @@ class TestBoardTiering:
         from config.settings import ASHBY_BOARDS, ASHBY_US_BOARDS
         src = AshbySource()
         assert src.priority_count == len(ASHBY_BOARDS)
-        assert "openai" in ASHBY_US_BOARDS
-        assert src.boards.index("openai") >= src.priority_count
+        # OpenAI is blocklisted (no ChatGPT jobs), so it's gone from the US tier.
+        assert "openai" not in ASHBY_US_BOARDS
+        assert "perplexity" in ASHBY_US_BOARDS
+        assert src.boards.index("perplexity") >= src.priority_count
 
     def test_explicit_boards_default_to_all_priority(self):
         src = GreenhouseSource(boards=["a", "b"])

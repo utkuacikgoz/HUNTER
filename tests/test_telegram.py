@@ -4,8 +4,8 @@ from telegram_bot.bot import (
     _active_apply_tasks,
     _escape_md,
     _format_apply_result,
+    _review_keyboard,
     format_job_message,
-    truncate,
 )
 
 
@@ -28,17 +28,22 @@ class TestEscapeMd:
             assert f"\\{char}" in result
 
 
-class TestTruncate:
-    def test_short_text_unchanged(self):
-        assert truncate("hello", 100) == "hello"
+class TestReviewKeyboard:
+    def _texts(self, markup):
+        return [btn.text for row in markup.inline_keyboard for btn in row]
 
-    def test_long_text_truncated(self):
-        result = truncate("a" * 200, 100)
-        assert len(result) == 103  # 100 + "..."
-        assert result.endswith("...")
+    def test_auto_apply_source_has_approve_skip(self):
+        job = {"id": 1, "url": "https://x/y", "platform": "greenhouse"}
+        texts = self._texts(_review_keyboard(job))
+        assert "✅ Approve" in texts
+        assert "❌ Skip" in texts
+        assert "🔗 View Job" in texts
 
-    def test_exact_length(self):
-        assert truncate("abcde", 5) == "abcde"
+    def test_link_only_source_has_no_approve_skip(self):
+        # RemoteOK / WeWorkRemotely / Recruitee / SmartRecruiters can't be auto-applied.
+        for platform in ("remoteok", "weworkremotely", "recruitee", "smartrecruiters"):
+            texts = self._texts(_review_keyboard({"id": 9, "url": "https://x/y", "platform": platform}))
+            assert texts == ["🔗 View Job"], platform
 
 
 class TestFormatJobMessage:
@@ -84,6 +89,26 @@ class TestFormatJobMessage:
         }
         msg = format_job_message(job, 1)
         assert "Not specified" in msg
+
+    def test_include_shows_sponsor_friendly_badge(self):
+        job = {
+            "title": "PM", "company": "Co", "location": "Remote", "salary": "",
+            "url": "https://example.com/j", "platform": "greenhouse", "id": 4,
+            "filter_verdict": "include",
+        }
+        # Hyphen is MarkdownV2-escaped ("Sponsor\\-friendly"); check the stable prefix.
+        assert "Sponsor" in format_job_message(job, 1)
+
+    def test_flag_shows_no_sponsor_badge(self):
+        # Unclear sponsorship: don't claim anything — no badge line at all.
+        job = {
+            "title": "PM", "company": "Co", "location": "Remote", "salary": "",
+            "url": "https://example.com/j", "platform": "greenhouse", "id": 5,
+            "filter_verdict": "flag",
+        }
+        msg = format_job_message(job, 1)
+        assert "Sponsor" not in msg
+        assert "Unclear" not in msg
 
 
 class TestFormatApplyResult:

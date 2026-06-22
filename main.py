@@ -13,6 +13,7 @@ from applicant.engine import apply_to_approved_jobs
 from config.log_redaction import install_redaction
 from config.settings import (
     BASE_DIR,
+    CLASSIFY_CONCURRENCY,
     DB_BACKUP_DIR,
     DB_PATH,
     ENABLE_LLM_SPONSOR_SCORING,
@@ -162,28 +163,36 @@ async def _classify_and_store(jobs: list[dict]) -> tuple[int, dict[str, int]]:
     counts = {"include": 0, "flag": 0, "drop": 0}
     new_count = 0
     reviewable = 0
-    for job in jobs:
-        verdict = await evaluate_job_async(job, llm_score=llm_score)
-        counts[verdict.verdict] += 1
-
-        job_id = insert_job(
-            title=job["title"],
-            company=job["company"],
-            location=job["location"],
-            salary=job["salary"],
-            url=job["url"],
-            platform=job["platform"],
-            description=job.get("description", ""),
-            region=verdict.region,
-            is_remote=verdict.is_remote,
-            sponsor_status=verdict.sponsor_status,
-            filter_verdict=verdict.verdict,
-            filter_reasons="; ".join(verdict.reasons)[:500] if verdict.reasons else None,
+    # Classify in bounded-concurrency chunks: the sponsor-scoring LLM call is a network
+    # round-trip, so scoring a chunk in parallel cuts the classify phase several-fold.
+    # Inserts and the reviewable cap stay sequential to preserve source-survival ordering;
+    # we over-score at most one chunk past the budget before breaking.
+    for start in range(0, len(jobs), CLASSIFY_CONCURRENCY):
+        chunk = jobs[start:start + CLASSIFY_CONCURRENCY]
+        verdicts = await asyncio.gather(
+            *(evaluate_job_async(job, llm_score=llm_score) for job in chunk)
         )
-        if job_id:
-            new_count += 1
-            if verdict.verdict != "drop":
-                reviewable += 1
+        for job, verdict in zip(chunk, verdicts, strict=True):
+            counts[verdict.verdict] += 1
+
+            job_id = insert_job(
+                title=job["title"],
+                company=job["company"],
+                location=job["location"],
+                salary=job["salary"],
+                url=job["url"],
+                platform=job["platform"],
+                description=job.get("description", ""),
+                region=verdict.region,
+                is_remote=verdict.is_remote,
+                sponsor_status=verdict.sponsor_status,
+                filter_verdict=verdict.verdict,
+                filter_reasons="; ".join(verdict.reasons)[:500] if verdict.reasons else None,
+            )
+            if job_id:
+                new_count += 1
+                if verdict.verdict != "drop":
+                    reviewable += 1
         # Cap on REVIEWABLE (include/flag) jobs, not total inserts — drops are still
         # persisted for dedup but must not consume the day's review budget, or a
         # high-drop source could exhaust it before the good jobs are reached.
@@ -228,7 +237,7 @@ async def hunt():
     pending = _rank_pending_by_velocity(velocity)
     if pending:
         logger.info(f"📱 Sending {len(pending)} jobs to Telegram...")
-        await send_jobs_batch(pending, velocity=velocity)
+        await send_jobs_batch(pending)
     else:
         logger.info("No new jobs to send")
 

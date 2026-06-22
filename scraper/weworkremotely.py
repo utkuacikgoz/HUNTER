@@ -10,8 +10,8 @@ import logging
 import re
 import xml.etree.ElementTree as ET
 
-from config.settings import ROLE_MATCH_KEYWORDS, WEWORKREMOTELY_FEEDS
-from scraper.base import ApiSource
+from config.settings import WEWORKREMOTELY_FEEDS
+from scraper.base import ApiSource, matches_role_title
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +27,7 @@ class WeWorkRemotelySource(ApiSource):
     accepts_query = False
 
     def _title_matches(self, title: str) -> bool:
-        t = (title or "").lower()
-        return any(kw in t for kw in ROLE_MATCH_KEYWORDS)
+        return matches_role_title(title)
 
     async def scrape(self, query: str = "", location: str = "", max_results: int = 10) -> list[dict]:
         jobs: list[dict] = []

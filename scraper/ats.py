@@ -19,10 +19,9 @@ from config.settings import (
     GREENHOUSE_US_BOARDS,
     LEVER_BOARDS,
     RECRUITEE_BOARDS,
-    ROLE_MATCH_KEYWORDS,
     SMARTRECRUITERS_COMPANIES,
 )
-from scraper.base import ApiSource
+from scraper.base import ApiSource, matches_role_title
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +53,7 @@ class AtsSource(ApiSource):
         self.priority_count = len(self.boards) if priority_count is None else priority_count
 
     def _title_matches(self, title: str) -> bool:
-        t = (title or "").lower()
-        return any(kw in t for kw in ROLE_MATCH_KEYWORDS)
+        return matches_role_title(title)
 
     def _ordered_boards(self) -> list[str]:
         """Priority tier first (rotated daily so its tail gets coverage over a span
