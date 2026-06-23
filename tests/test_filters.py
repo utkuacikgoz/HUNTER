@@ -1,6 +1,7 @@
 """Tests for scraper/filters.py — the job-classification pipeline."""
 import pytest
 
+import scraper.filters as filters
 from scraper.filters import (
     JobVerdict,
     check_sponsor_allowlist,
@@ -9,6 +10,7 @@ from scraper.filters import (
     detect_remote,
     detect_us_only_blocker,
     evaluate_job,
+    evaluate_job_async,
 )
 
 
@@ -199,6 +201,21 @@ class TestCheckSponsorAllowlist:
         assert check_sponsor_allowlist("") == "unknown"
         assert check_sponsor_allowlist(None) == "unknown"  # type: ignore[arg-type]
 
+    def test_blocklisted_company(self, monkeypatch):
+        monkeypatch.setattr(filters, "SPONSOR_BLOCKLIST_COMPANIES", {"blockedco"})
+        assert check_sponsor_allowlist("BlockedCo") == "blocklist"
+
+    def test_blocklist_beats_allowlist(self, monkeypatch):
+        # A company on both lists is blocked — the blocklist is checked first.
+        monkeypatch.setattr(filters, "SPONSOR_BLOCKLIST_COMPANIES", {"stripe"})
+        assert check_sponsor_allowlist("Stripe") == "blocklist"
+
+    def test_default_blocks_canonical_and_openai(self):
+        # Point-6 requirement: never surface Canonical or OpenAI/ChatGPT roles.
+        assert check_sponsor_allowlist("Canonical") == "blocklist"
+        assert check_sponsor_allowlist("OpenAI") == "blocklist"
+        assert check_sponsor_allowlist("Open AI") == "blocklist"
+
 
 class TestEvaluateJob:
     def test_allowlisted_emea_remote_includes(self):
@@ -338,6 +355,18 @@ class TestEvaluateJob:
         assert v.verdict == "flag"
         assert v.region == "emea"
 
+    def test_blocklisted_company_drops(self, monkeypatch):
+        monkeypatch.setattr(filters, "SPONSOR_BLOCKLIST_COMPANIES", {"blockedco"})
+        v = evaluate_job({
+            "title": "Senior PM",
+            "company": "BlockedCo",
+            "location": "Remote, Europe",
+            "description": "Great EU remote role.",
+        })
+        assert v.verdict == "drop"
+        assert v.sponsor_status == "blocklist"
+        assert "blocklist" in v.reasons[0]
+
     def test_verdict_dataclass_fields(self):
         v = JobVerdict(
             region="eu", is_remote=True, sponsor_status="allowlist",
@@ -345,3 +374,71 @@ class TestEvaluateJob:
         )
         assert v.region == "eu"
         assert v.reasons == ["test"]
+
+
+class TestEvaluateJobAsync:
+    """The LLM sponsor-scoring layer: only runs on flag+unknown jobs and can flip the
+    verdict to include (yes) or drop (no), or leave it flagged (unclear / error)."""
+
+    # An unknown-sponsor EU-remote job → sync verdict is flag/unknown, so the LLM runs.
+    FLAG_JOB = {
+        "title": "PM",
+        "company": "FooCorp",
+        "location": "Berlin, Germany - Remote",
+        "description": "Awesome team in EU.",
+    }
+
+    def _scorer(self, verdict, *, recorder=None):
+        async def score(company, description):
+            if recorder is not None:
+                recorder.append((company, description))
+            return {"verdict": verdict, "reasons": f"signal:{verdict}"}
+        return score
+
+    async def test_llm_yes_promotes_to_include(self):
+        v = await evaluate_job_async(dict(self.FLAG_JOB), llm_score=self._scorer("yes"))
+        assert v.verdict == "include"
+        assert v.sponsor_status == "llm_yes"
+
+    async def test_llm_no_demotes_to_drop(self):
+        v = await evaluate_job_async(dict(self.FLAG_JOB), llm_score=self._scorer("no"))
+        assert v.verdict == "drop"
+        assert v.sponsor_status == "llm_no"
+
+    async def test_llm_unclear_stays_flag(self):
+        v = await evaluate_job_async(dict(self.FLAG_JOB), llm_score=self._scorer("unclear"))
+        assert v.verdict == "flag"
+        assert v.sponsor_status == "unknown"
+        assert any("unclear" in r for r in v.reasons)
+
+    async def test_llm_exception_falls_back_to_sync_verdict(self):
+        async def boom(company, description):
+            raise RuntimeError("API down")
+        v = await evaluate_job_async(dict(self.FLAG_JOB), llm_score=boom)
+        assert v.verdict == "flag"  # unchanged; the error is swallowed
+
+    async def test_none_scorer_returns_sync_verdict(self):
+        v = await evaluate_job_async(dict(self.FLAG_JOB), llm_score=None)
+        assert v.verdict == "flag"
+
+    async def test_llm_not_called_for_hard_drop(self):
+        # US-only language already drops in pure Python — don't spend tokens on it.
+        calls: list = []
+        job = {
+            "title": "PM", "company": "Acme", "location": "Remote",
+            "description": "Must be located in the United States. No visa sponsorship.",
+        }
+        v = await evaluate_job_async(job, llm_score=self._scorer("yes", recorder=calls))
+        assert v.verdict == "drop"
+        assert calls == []  # LLM never invoked
+
+    async def test_llm_not_called_for_allowlist_include(self):
+        # Allowlisted company is already a confident include — skip the LLM.
+        calls: list = []
+        job = {
+            "title": "Senior PM", "company": "Stripe",
+            "location": "Remote, Europe", "description": "EU remote.",
+        }
+        v = await evaluate_job_async(job, llm_score=self._scorer("no", recorder=calls))
+        assert v.verdict == "include"
+        assert calls == []
