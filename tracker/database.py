@@ -1,3 +1,4 @@
+import re
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
@@ -18,7 +19,37 @@ _FILTER_COLUMNS = (
     ("sponsor_status", "TEXT"),
     ("filter_verdict", "TEXT"),
     ("filter_reasons", "TEXT"),
+    # Content fingerprint (company + title) used to suppress re-surfacing a job
+    # the user already acted on when it reappears under a different URL.
+    ("dedup_key", "TEXT"),
 )
+
+# Statuses that mean "the user already acted on this job"; a still-pending twin
+# (same dedup_key, different URL) of any of these is hidden from review.
+_ACTED_STATUSES = ("rejected", "approved", "applied", "interviewing", "offered")
+
+_DEDUP_WS = re.compile(r"\s+")
+_DEDUP_EDGE_PUNCT = re.compile(r"^[\W_]+|[\W_]+$")
+
+
+def compute_dedup_key(company: str | None, title: str | None) -> str | None:
+    """Conservative content signature: ``"company||title"``, each lowercased,
+    internal whitespace collapsed, surrounding punctuation stripped.
+
+    Deliberately not aggressive — no stemming or seniority-word dropping — so
+    distinct roles like "Senior PM" vs "PM" at the same company stay distinct.
+    Returns ``None`` when either field is empty so NULL keys never collide
+    (SQL ``=`` is never true for NULL=NULL); see ``get_pending_jobs``.
+    """
+    def _norm(value: str | None) -> str:
+        text = _DEDUP_WS.sub(" ", (value or "").lower()).strip()
+        return _DEDUP_EDGE_PUNCT.sub("", text).strip()
+
+    company_norm = _norm(company)
+    title_norm = _norm(title)
+    if not company_norm or not title_norm:
+        return None
+    return f"{company_norm}||{title_norm}"
 
 
 def _add_missing_columns(conn):
@@ -26,6 +57,17 @@ def _add_missing_columns(conn):
     for name, sql_type in _FILTER_COLUMNS:
         if name not in existing:
             conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {sql_type}")
+
+
+def _backfill_dedup_keys(conn):
+    """Populate dedup_key for rows that predate the column. Idempotent: only
+    NULL keys are recomputed, so this is a no-op after the first run."""
+    for row in conn.execute(
+        "SELECT id, company, title FROM jobs WHERE dedup_key IS NULL"
+    ).fetchall():
+        key = compute_dedup_key(row["company"], row["title"])
+        if key is not None:
+            conn.execute("UPDATE jobs SET dedup_key = ? WHERE id = ?", (key, row["id"]))
 
 
 def init_db():
@@ -75,6 +117,8 @@ def init_db():
     """)
     _add_missing_columns(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_filter_verdict ON jobs(filter_verdict)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_dedup_key ON jobs(dedup_key)")
+    _backfill_dedup_keys(conn)
     conn.commit()
     conn.close()
 
@@ -153,16 +197,17 @@ def insert_job(
     conn = get_connection()
     try:
         description = (description or "")[:5000]
+        dedup_key = compute_dedup_key(company, title)
         conn.execute(
             """INSERT OR IGNORE INTO jobs
                (title, company, location, salary, url, platform, description,
-                region, is_remote, sponsor_status, filter_verdict, filter_reasons)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                region, is_remote, sponsor_status, filter_verdict, filter_reasons, dedup_key)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 title, company, location, salary, url, platform, description,
                 region,
                 int(is_remote) if is_remote is not None else None,
-                sponsor_status, filter_verdict, filter_reasons,
+                sponsor_status, filter_verdict, filter_reasons, dedup_key,
             ),
         )
         was_inserted = conn.execute("SELECT changes()").fetchone()[0] > 0
@@ -195,12 +240,25 @@ def log_action(job_id, action, detail="", conn=None):
 
 
 def get_pending_jobs(limit=50):
+    # Hide a pending job whose content fingerprint matches one the user already
+    # acted on (skipped/approved/applied/...) under a different URL. dedup_key IS
+    # NULL rows are never suppressed (we couldn't fingerprint them). The status
+    # set is a hardcoded literal — no user input, no injection surface.
+    acted = ", ".join(f"'{s}'" for s in _ACTED_STATUSES)
     conn = get_connection()
     try:
         rows = conn.execute(
-            """SELECT * FROM jobs
+            f"""SELECT * FROM jobs
                WHERE status = 'pending'
                  AND (filter_verdict IS NULL OR filter_verdict != 'drop')
+                 AND (
+                   dedup_key IS NULL
+                   OR NOT EXISTS (
+                     SELECT 1 FROM jobs acted
+                     WHERE acted.dedup_key = jobs.dedup_key
+                       AND acted.status IN ({acted})
+                   )
+                 )
                ORDER BY
                  CASE filter_verdict
                    WHEN 'include' THEN 0

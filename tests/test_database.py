@@ -17,6 +17,7 @@ with mock.patch.dict(os.environ, {"DB_PATH": _tmp.name}):
 
     from tracker.database import (
         approve_job,
+        compute_dedup_key,
         get_all_applied_jobs,
         get_approved_jobs,
         get_company_velocity,
@@ -428,3 +429,79 @@ class TestFunnelAndWatchdog:
         assert "apply_confirmed" in f and "apply_failed" in f
         assert f["verdicts"].get("include", 0) >= 1
         assert f["statuses"].get("pending", 0) >= 1
+
+
+class TestDedupSuppression:
+    """A job the user already acted on suppresses its content-twins (same
+    company+title) when they reappear under a different URL."""
+
+    def test_compute_dedup_key_normalization(self):
+        assert compute_dedup_key("Acme", "") is None
+        assert compute_dedup_key("", "PM") is None
+        assert compute_dedup_key(None, "PM") is None
+        assert compute_dedup_key(" Acme ", " PM ") == "acme||pm"
+        # case, doubled internal whitespace, and edge punctuation are neutralized
+        assert (
+            compute_dedup_key("Acme  Inc.", " Product   Manager ")
+            == compute_dedup_key("acme  inc.", "Product Manager")
+        )
+
+    def test_twin_under_different_url_suppressed_after_skip(self):
+        a = insert_job("Product Manager", "Acme", "Remote", "", "https://a.com/1", "greenhouse")
+        reject_job(a)  # the Telegram "Skip" path sets status='rejected'
+        b = insert_job("Product Manager", "Acme", "Remote", "", "https://b.com/2", "lever")
+        assert b is not None  # twin is still stored (different URL)
+        pending_ids = {j["id"] for j in get_pending_jobs()}
+        assert b not in pending_ids
+
+    @pytest.mark.parametrize("act", [approve_job, mark_applied])
+    def test_twin_suppressed_for_approved_and_applied(self, act):
+        a = insert_job("Designer", "Globex", "Remote", "", "https://a.com/d1", "greenhouse")
+        act(a)
+        b = insert_job("Designer", "Globex", "Remote", "", "https://b.com/d2", "lever")
+        assert b not in {j["id"] for j in get_pending_jobs()}
+
+    def test_distinct_roles_same_company_not_suppressed(self):
+        a = insert_job("Senior PM", "Acme", "Remote", "", "https://a.com/s1", "greenhouse")
+        reject_job(a)
+        b = insert_job("PM", "Acme", "Remote", "", "https://b.com/s2", "lever")
+        assert b in {j["id"] for j in get_pending_jobs()}
+
+    def test_cosmetic_variants_are_twins(self):
+        a = insert_job("Product Manager", "Acme  Inc.", "Remote", "", "https://a.com/c1", "greenhouse")
+        reject_job(a)
+        # different case + extra/trailing whitespace, different URL → still a twin
+        b = insert_job("Product   Manager ", "acme  inc.", "Remote", "", "https://b.com/c2", "lever")
+        assert b not in {j["id"] for j in get_pending_jobs()}
+
+    def test_null_keys_do_not_collide(self):
+        # empty company → NULL dedup_key for both rows
+        a = insert_job("PM", "", "Remote", "", "https://a.com/n1", "greenhouse")
+        b = insert_job("PM", "", "Remote", "", "https://b.com/n2", "lever")
+        reject_job(a)
+        assert b in {j["id"] for j in get_pending_jobs()}
+
+    def test_pending_twins_do_not_suppress_each_other(self):
+        a = insert_job("Product Manager", "Acme", "Remote", "", "https://a.com/t1", "greenhouse")
+        b = insert_job("Product Manager", "Acme", "Remote", "", "https://b.com/t2", "lever")
+        ids = {j["id"] for j in get_pending_jobs()}
+        assert a in ids and b in ids  # neither acted on → both visible
+
+    def test_backfill_populates_existing_null_keys(self):
+        a = insert_job("Product Manager", "Acme", "Remote", "", "https://a.com/bf1", "greenhouse")
+        # simulate a pre-feature row whose key was never computed
+        conn = get_connection()
+        conn.execute("UPDATE jobs SET dedup_key = NULL WHERE id = ?", (a,))
+        conn.commit()
+        conn.close()
+
+        init_db()  # runs the idempotent backfill
+
+        conn = get_connection()
+        key = conn.execute("SELECT dedup_key FROM jobs WHERE id = ?", (a,)).fetchone()["dedup_key"]
+        conn.close()
+        assert key == "acme||product manager"
+
+        reject_job(a)
+        b = insert_job("Product Manager", "Acme", "Remote", "", "https://b.com/bf2", "lever")
+        assert b not in {j["id"] for j in get_pending_jobs()}
