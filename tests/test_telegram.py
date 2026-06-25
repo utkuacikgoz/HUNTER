@@ -39,11 +39,13 @@ class TestReviewKeyboard:
         assert "❌ Skip" in texts
         assert "🔗 View Job" in texts
 
-    def test_link_only_source_has_no_approve_skip(self):
-        # RemoteOK / WeWorkRemotely / Recruitee / SmartRecruiters can't be auto-applied.
+    def test_link_only_source_has_skip_but_no_approve(self):
+        # RemoteOK / WeWorkRemotely / Recruitee / SmartRecruiters can't be auto-applied,
+        # so they get no Approve — but Skip stays so the user can still dismiss them.
         for platform in ("remoteok", "weworkremotely", "recruitee", "smartrecruiters"):
             texts = self._texts(_review_keyboard({"id": 9, "url": "https://x/y", "platform": platform}))
-            assert texts == ["🔗 View Job"], platform
+            assert texts == ["❌ Skip", "🔗 View Job"], platform
+            assert "✅ Approve" not in texts, platform
 
 
 class TestFormatJobMessage:
@@ -63,6 +65,8 @@ class TestFormatJobMessage:
         assert "Remote" in msg
         assert "100k" in msg
         assert "LinkedIn" in msg or "linkedin" in msg.lower()
+        # The header no longer carries an inline apply link — the View Job button covers it.
+        assert "Apply Link" not in msg
 
     def test_no_salary_line(self):
         job = {

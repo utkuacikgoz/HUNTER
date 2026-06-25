@@ -41,7 +41,6 @@ _REGION_LABEL = {"us": "US", "eu": "EU", "emea": "EMEA", "other": "Other", "unkn
 
 def format_job_message(job: dict, index: int = 0) -> str:
     salary_line = f"💰 {_escape_md(job['salary'])}\n" if job.get("salary") else ""
-    escaped_url = _escape_md(job['url'])
     sep = '─' * 30
     idx = _escape_md(str(index))
 
@@ -61,14 +60,14 @@ def format_job_message(job: dict, index: int = 0) -> str:
         f"{region_line}"
         f"{salary_line}"
         f"🌐 {_escape_md(job['platform'].capitalize())}\n"
-        f"🔗 [Apply Link]({escaped_url})\n"
     )
 
 
 def _review_keyboard(job: dict) -> InlineKeyboardMarkup:
     """Auto-applyable sources get Approve/Skip + View Job. Sources we can't auto-apply to
-    (RemoteOK/WeWorkRemotely/Recruitee/SmartRecruiters) get only the apply link — Approve
-    would queue a submit that can't run for them."""
+    (RemoteOK/WeWorkRemotely/Recruitee/SmartRecruiters) get Skip + View Job — no Approve,
+    since that would queue a submit that can't run for them, but Skip must stay so the user
+    can dismiss them (which also suppresses re-surfacing of the same role under another URL)."""
     if (job.get("platform") or "").lower() in AUTO_APPLY_PLATFORMS:
         return InlineKeyboardMarkup([
             [
@@ -77,7 +76,12 @@ def _review_keyboard(job: dict) -> InlineKeyboardMarkup:
             ],
             [InlineKeyboardButton("🔗 View Job", url=job["url"])],
         ])
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔗 View Job", url=job["url"])]])
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("❌ Skip", callback_data=f"reject_{job['id']}"),
+            InlineKeyboardButton("🔗 View Job", url=job["url"]),
+        ],
+    ])
 
 
 def _record_filter_outcome(job: dict, decision: str) -> None:
