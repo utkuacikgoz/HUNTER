@@ -536,31 +536,68 @@ def run_all_profiles():
     Lets a single machine host several independent bots (e.g. Utku's PM hunt + a
     friend's marketing hunt) from one checkout — each child gets its own
     HUNTER_PROFILE, which loads its own `.env.<profile>` overlay and DB. An empty
-    entry ("") means the default (no-profile) bot. SIGINT/SIGTERM is forwarded so
-    every child shuts down gracefully.
+    entry ("") means the default (no-profile) bot.
+
+    Resilience: each child is supervised independently — if one exits it's
+    restarted (with a short backoff so a misconfigured profile can't hot-loop or
+    take its sibling down). This preserves single-bot behavior (a crashed bot comes
+    back) without one bad profile killing the others. SIGINT/SIGTERM is forwarded so
+    every child shuts down gracefully, then the supervisor waits for them and exits.
     """
     import os
     import subprocess
+    import time
 
-    procs: list[subprocess.Popen] = []
+    def _spawn(profile: str) -> subprocess.Popen:
+        env = {**os.environ, "HUNTER_PROFILE": profile}
+        return subprocess.Popen([sys.executable, str(BASE_DIR / "main.py"), "bot"], env=env)
+
+    children: dict[str, subprocess.Popen] = {}
+    started_at: dict[str, float] = {}
     for profile in HUNTER_PROFILES:
-        child_env = {**os.environ, "HUNTER_PROFILE": profile}
-        label = profile or "default"
-        logger.info(f"Starting bot process for profile '{label}'...")
-        procs.append(subprocess.Popen([sys.executable, str(BASE_DIR / "main.py"), "bot"], env=child_env))
+        logger.info(f"Starting bot process for profile '{profile or 'default'}'...")
+        children[profile] = _spawn(profile)
+        started_at[profile] = time.monotonic()
+
+    shutting_down = {"v": False}
 
     def _forward(sig, _frame):
-        logger.info(f"Supervisor received signal {sig}; forwarding to {len(procs)} child(ren)...")
-        for p in procs:
+        shutting_down["v"] = True
+        logger.info(f"Supervisor received signal {sig}; forwarding to {len(children)} child(ren)...")
+        for p in children.values():
             p.send_signal(sig)
 
     signal.signal(signal.SIGINT, _forward)
     signal.signal(signal.SIGTERM, _forward)
 
-    exit_code = 0
-    for p in procs:
-        exit_code = p.wait() or exit_code
-    sys.exit(exit_code)
+    while not shutting_down["v"]:
+        for profile, p in list(children.items()):
+            if p.poll() is None:
+                continue
+            # Child exited unexpectedly — restart it. Back off if it died young
+            # (likely a startup/config failure) so a broken profile can't hot-loop.
+            uptime = time.monotonic() - started_at[profile]
+            delay = 0 if uptime >= 60 else 10
+            logger.error(
+                f"Bot for profile '{profile or 'default'}' exited (code {p.returncode}); "
+                f"restarting in {delay}s."
+            )
+            if delay:
+                time.sleep(delay)
+            if shutting_down["v"]:
+                break
+            children[profile] = _spawn(profile)
+            started_at[profile] = time.monotonic()
+        time.sleep(1)
+
+    # Graceful shutdown: signal already forwarded; wait for each child to drain.
+    for profile, p in children.items():
+        try:
+            p.wait(timeout=90)
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Bot for profile '{profile or 'default'}' did not exit in time; killing.")
+            p.kill()
+    sys.exit(0)
 
 
 def backup_database():
@@ -570,7 +607,10 @@ def backup_database():
         return
     DB_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-    dest = DB_BACKUP_DIR / f"hunter_{timestamp}.db"
+    # Key the backup name on the DB stem so co-located profiles (hunter.db vs
+    # hunter_hakan.db) don't collide on the same-second timestamp. The prune glob
+    # below ("hunter_*") still matches both stems.
+    dest = DB_BACKUP_DIR / f"{DB_PATH.stem}_{timestamp}.db"
     import sqlite3
     src_conn = sqlite3.connect(str(DB_PATH))
     dst_conn = sqlite3.connect(str(dest))
