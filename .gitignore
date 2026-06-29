@@ -1,4 +1,9 @@
 .env
+# Per-profile env overlays (.env.hakan, etc.) hold secrets/PII — never commit.
+# The committed *.example templates are the exception.
+.env.*
+!.env.example
+!.env.*.example
 __pycache__/
 *.pyc
 *.pyo
@@ -11,6 +16,9 @@ venv/
 .mypy_cache/
 config/resume.pdf
 config/resume.txt
+# Per-profile resumes (config/resume.hakan.txt, etc.) — PII, never commit.
+config/resume.*.txt
+config/resume.*.pdf
 .playwright/
 screenshots/
 backups/
