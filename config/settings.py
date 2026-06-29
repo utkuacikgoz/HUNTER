@@ -8,6 +8,24 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# --- Profiles ---
+# A profile lets one checkout run as more than one independent bot (e.g. Utku's
+# PM hunt vs. a friend's marketing hunt) without a second deployment. Set
+# HUNTER_PROFILE=<name> in the real environment and drop a `.env.<name>` overlay
+# next to `.env` (or on the data volume in prod) — its values win via override.
+# The default (empty) profile is the original single-bot behavior, untouched.
+HUNTER_PROFILE = os.getenv("HUNTER_PROFILE", "").strip()
+if HUNTER_PROFILE:
+    for _overlay in (BASE_DIR / f".env.{HUNTER_PROFILE}", Path("/data") / f".env.{HUNTER_PROFILE}"):
+        if _overlay.exists():
+            load_dotenv(_overlay, override=True)
+
+# Comma-separated profile names for the `bot-all` supervisor (see main.py). Unlike
+# other CSV settings, an EMPTY entry is meaningful — it denotes the default
+# (no-profile) bot — so we keep blanks: "" → [""], ",hakan" → ["", "hakan"].
+_raw_profiles = os.getenv("HUNTER_PROFILES")
+HUNTER_PROFILES = [p.strip() for p in _raw_profiles.split(",")] if _raw_profiles else [""]
+
 # --- Logging ---
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
@@ -54,6 +72,13 @@ def _csv_set(env_name: str, default: str) -> set[str]:
 def _csv_list(env_name: str, default: str) -> list[str]:
     raw = os.getenv(env_name, default)
     return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _bool(env_name: str, default: bool) -> bool:
+    raw = os.getenv(env_name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y"}
 
 
 # --- Region / sponsor filtering ---
@@ -175,6 +200,10 @@ WELLFOUND_SELECTORS = [
 ]
 # Skip a scraper if its last N runs all returned 0 jobs (0 disables the check).
 SCRAPER_SKIP_AFTER_ZEROS = int(os.getenv("SCRAPER_SKIP_AFTER_ZEROS", "3"))
+# Run the browser-based scrapers (RemoteOK, Wellfound — they launch Chromium).
+# Set false to run API-only (no Playwright/Chromium): lighter on RAM, ideal for a
+# co-located profile that never auto-applies. Default true keeps all sources.
+ENABLE_BROWSER_SCRAPERS = _bool("ENABLE_BROWSER_SCRAPERS", True)
 
 # --- Hiring velocity (DB-only) ---
 # Window over which we count distinct roles per company.
@@ -203,6 +232,16 @@ HUNT_SCHEDULE_MINUTE = int(os.getenv("HUNT_SCHEDULE_MINUTE", "0"))
 FOLLOWUP_SCHEDULE_HOUR = int(os.getenv("FOLLOWUP_SCHEDULE_HOUR", "10"))
 
 # --- Apply engine ---
+# Master switch for the whole auto-apply path. When false, the Telegram review UI
+# drops Approve/Apply and /apply refuses — the user applies manually. Used by
+# profiles that only want sourcing (+ optional cover letters, see below). Default
+# true keeps the original behavior.
+ENABLE_AUTO_APPLY = _bool("ENABLE_AUTO_APPLY", True)
+# Offer on-demand cover-letter generation in the review UI (the 📄 Cover Letter
+# button shown when ENABLE_AUTO_APPLY is off). Set false for a pure job-feed
+# profile (Skip / View Job only); flip true later to turn the feature on. Default
+# true. (Has no effect while ENABLE_AUTO_APPLY is on — that path applies directly.)
+ENABLE_COVER_LETTERS = _bool("ENABLE_COVER_LETTERS", True)
 # When true, structured ATS appliers fill the form but DO NOT click submit (they
 # screenshot for manual review). Flip on to safely validate form-filling against
 # real postings before letting the bot submit for you.
@@ -221,17 +260,14 @@ DB_BACKUP_DIR = BASE_DIR / "backups"
 # --- Reminder ---
 FOLLOWUP_DAYS = int(os.getenv("FOLLOWUP_DAYS", "7"))
 
-# Search queries - tailored for Utku's profile
-SEARCH_QUERIES = [
-    "Senior Product Manager",
-    "Product Manager Fintech",
-    "Product Manager Marketplace",
-    "Product Manager Blockchain",
-    "Product Manager SaaS",
-    "Senior PM Remote",
-    "Product Lead",
-    "Head of Product",
-]
+# Search queries — default tailored for Utku's PM profile; override via env
+# (comma-separated) for a different target, e.g. a marketing profile.
+SEARCH_QUERIES = _csv_list(
+    "SEARCH_QUERIES",
+    "Senior Product Manager,Product Manager Fintech,Product Manager Marketplace,"
+    "Product Manager Blockchain,Product Manager SaaS,Senior PM Remote,"
+    "Product Lead,Head of Product",
+)
 
 # RemoteOK is tag-driven: its API is /api?tag=<tag>. Multi-word SEARCH_QUERIES turn
 # into dead tags (e.g. "senior-product-manager"), so RemoteOK uses these real tags
@@ -248,12 +284,18 @@ WEWORKREMOTELY_FEEDS = _csv_list(
 
 # Resume text — loaded from file at runtime, NOT hardcoded in source.
 # The "missing resume" warning is emitted from validate_config(), not at import,
-# so it doesn't spam during tests or unrelated CLI commands.
-_resume_file = BASE_DIR / "config" / "resume.txt"
-if _resume_file.exists():
-    RESUME_TEXT = _resume_file.read_text(encoding="utf-8")
-else:
-    RESUME_TEXT = os.getenv("RESUME_TEXT", "")
+# so it doesn't spam during tests or unrelated CLI commands. A profile-specific
+# file (config/resume.<profile>.txt) is preferred so one profile's resume can't
+# shadow another's; then the shared config/resume.txt; then the RESUME_TEXT env.
+_resume_candidates = []
+if HUNTER_PROFILE:
+    _resume_candidates.append(BASE_DIR / "config" / f"resume.{HUNTER_PROFILE}.txt")
+_resume_candidates.append(BASE_DIR / "config" / "resume.txt")
+RESUME_TEXT = os.getenv("RESUME_TEXT", "")
+for _resume_file in _resume_candidates:
+    if _resume_file.exists():
+        RESUME_TEXT = _resume_file.read_text(encoding="utf-8")
+        break
 
 
 def validate_config(command: str) -> list[str]:

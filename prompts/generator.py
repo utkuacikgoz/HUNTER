@@ -230,19 +230,24 @@ async def score_sponsor_signal(company: str, description: str) -> dict:
 
 
 def _fallback_cover_letter(job_title: str, company: str) -> str:
-    """Fallback cover letter when API fails."""
+    """Generic fallback cover letter used only when ANTHROPIC_API_KEY is unset (so
+    no tailored letter can be generated). Profile-agnostic and name-driven — it
+    invents no metrics or background, since those would be wrong for any non-default
+    candidate. With an API key set, generate_cover_letter() is used instead."""
+    name = COMMON_ANSWERS.get("name") or "Applicant"
     return f"""Dear Hiring Manager,
 
 I am writing to express my interest in the {job_title} position at {company}.
 
-As a Senior Product Manager with 8+ years of experience delivering 11+ digital products across fintech, blockchain, e-commerce, and marketplace domains, I believe I am well-suited for this role. My experience spans both 0-to-1 product development and scaling existing platforms, leading distributed cross-functional teams of up to 25 people.
+My background and experience align well with what this role calls for, and I am
+confident I can contribute meaningfully to your team. I would welcome the chance to
+walk you through how my experience maps to your needs, and to learn more about the
+work you are doing at {company}.
 
-At BiLira, I currently lead compliance and OTC strategy for a crypto exchange serving 100,000+ users, where I built automation pipelines that reduced manual review time by 35%. At Upshift, I drove 26% operational efficiency improvement across the B2B marketplace through process optimization and AI-powered automation.
-
-I am confident that my track record of data-driven decision making, cross-functional leadership, and delivering measurable results would make me a valuable addition to your team. I would welcome the opportunity to discuss how my experience aligns with your needs.
+Thank you for your time and consideration.
 
 Best regards,
-{COMMON_ANSWERS.get('name', 'Applicant')}"""
+{name}"""
 
 
 # Pre-built answers — loaded from env vars, NOT hardcoded PII
