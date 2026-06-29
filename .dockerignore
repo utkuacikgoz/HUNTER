@@ -7,8 +7,15 @@ __pycache__
 *.pyc
 *.pyo
 
-# Local state — must never be baked into the image.
+# Local state — must never be baked into the image. Secrets/PII live on the
+# /data volume or in `fly secrets`, never in an image layer. Note: .dockerignore
+# (unlike .gitignore) is the ONLY thing that keeps `COPY . .` from baking these in.
 .env
+.env.*
+config/resume.txt
+config/resume.*.txt
+config/resume.pdf
+config/resume.*.pdf
 *.db
 *.db-wal
 *.db-shm
