@@ -72,6 +72,28 @@ Required vars by command (from `validate_config`):
 `stats`, `backup`, and `followup` run with no credentials, so use them to smoke-test.
 Resume text is read from `config/resume.txt` (preferred) or the `RESUME_TEXT` env var.
 
+### Profiles (running more than one bot from one checkout)
+
+The same code can run as several independent bots (e.g. Utku's PM hunt + a friend's
+marketing hunt) without a second deployment. Set `HUNTER_PROFILE=<name>` in the real
+environment; settings.py then loads `.env.<name>` (or `/data/.env.<name>` in prod) as
+an **overlay on top of `.env`** (overlay wins), and prefers `config/resume.<name>.txt`.
+Give the profile its own `DB_PATH` and Telegram bot so the two never share state.
+
+```
+HUNTER_PROFILE=hakan .venv/bin/python main.py bot        # one profile
+HUNTER_PROFILES=,hakan .venv/bin/python main.py bot-all  # supervisor: default + hakan
+```
+
+`.env.<name>` and `config/resume.<name>.txt` are gitignored (PII); a committed
+`.env.<name>.example` is the template. Relevant toggles: `ENABLE_AUTO_APPLY` (false →
+review UI drops Approve, `/apply` refuses), `ENABLE_COVER_LETTERS` (when auto-apply is
+off, false → pure job feed, true → adds a 📄 Cover Letter button), and
+`ENABLE_BROWSER_SCRAPERS` (false → API-only sources, no Chromium). `SEARCH_QUERIES`,
+`ROLE_MATCH_KEYWORDS`, `REMOTEOK_TAGS`, and `WEWORKREMOTELY_FEEDS` retarget the search
+(e.g. PM → marketing). The `hakan` profile (marketing, sourcing-only) is the worked
+example — see `.env.hakan.example`.
+
 ## Setup & common commands
 
 ```bash

@@ -14,7 +14,14 @@ from telegram.ext import (
 )
 
 from applicant.engine import apply_to_single_job
-from config.settings import AUTO_APPLY_PLATFORMS, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from config.settings import (
+    AUTO_APPLY_PLATFORMS,
+    ENABLE_AUTO_APPLY,
+    ENABLE_COVER_LETTERS,
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
+)
+from prompts.generator import generate_cover_letter
 from tracker.database import (
     approve_job,
     get_all_applied_jobs,
@@ -27,6 +34,7 @@ from tracker.database import (
     log_action,
     record_followup,
     reject_job,
+    set_cover_letter,
     update_job_status,
 )
 
@@ -67,7 +75,19 @@ def _review_keyboard(job: dict) -> InlineKeyboardMarkup:
     """Auto-applyable sources get Approve/Skip + View Job. Sources we can't auto-apply to
     (RemoteOK/WeWorkRemotely/Recruitee/SmartRecruiters) get Skip + View Job — no Approve,
     since that would queue a submit that can't run for them, but Skip must stay so the user
-    can dismiss them (which also suppresses re-surfacing of the same role under another URL)."""
+    can dismiss them (which also suppresses re-surfacing of the same role under another URL).
+
+    When ENABLE_AUTO_APPLY is off the user applies manually, so there is no Approve. If
+    ENABLE_COVER_LETTERS is on they get a "Generate Cover Letter" action; otherwise the card
+    is a pure job feed (Skip / View Job)."""
+    if not ENABLE_AUTO_APPLY:
+        first_row = [InlineKeyboardButton("❌ Skip", callback_data=f"reject_{job['id']}")]
+        if ENABLE_COVER_LETTERS:
+            first_row.insert(0, InlineKeyboardButton("📄 Cover Letter", callback_data=f"coverletter_{job['id']}"))
+        return InlineKeyboardMarkup([
+            first_row,
+            [InlineKeyboardButton("🔗 View Job", url=job["url"])],
+        ])
     if (job.get("platform") or "").lower() in AUTO_APPLY_PLATFORMS:
         return InlineKeyboardMarkup([
             [
@@ -115,11 +135,22 @@ async def send_jobs_batch(jobs: list[dict]) -> None:
 
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
+    if ENABLE_AUTO_APPLY:
+        actions = (
+            "Use buttons to Approve ✅ or Skip ❌ each job\\.\n"
+            "Then send /apply to auto\\-apply to all approved jobs\\."
+        )
+    elif ENABLE_COVER_LETTERS:
+        actions = (
+            "Tap 📄 Cover Letter for a tailored draft, or ❌ Skip\\.\n"
+            "Apply yourself via 🔗 View Job\\."
+        )
+    else:
+        actions = "Tap ❌ Skip to dismiss, or 🔗 View Job to apply yourself\\."
     header = (
         f"🎯 *HUNTER \\- New Jobs Found*\n"
         f"📊 {len(jobs)} jobs ready for review\n\n"
-        f"Use buttons to Approve ✅ or Skip ❌ each job\\.\n"
-        f"Then send /apply to auto\\-apply to all approved jobs\\."
+        f"{actions}"
     )
 
     try:
@@ -247,12 +278,13 @@ def _is_authorized(update: Update) -> bool:
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         return
+    apply_line = "/apply - Apply to approved jobs\n" if ENABLE_AUTO_APPLY else ""
     await update.message.reply_text(
         "🎯 *HUNTER Bot Active*\n\n"
         "Commands:\n"
         "/hunt - Scrape new jobs\n"
         "/review - Show pending jobs\n"
-        "/apply - Apply to approved jobs\n"
+        f"{apply_line}"
         "/stats - Show statistics\n"
         "/followups - Check follow-up reminders\n"
         "/applied - List all applied jobs",
@@ -519,6 +551,63 @@ async def _handle_applynow(query, job: dict) -> None:
     )
 
 
+async def _handle_coverletter(query, job: dict) -> None:
+    """Generate a tailored cover letter for this job and send it for copy/paste.
+
+    Used by cover-letter-only profiles (ENABLE_AUTO_APPLY off): no application is
+    submitted — the user applies manually via the job link. The letter is persisted
+    so it isn't regenerated if the user taps again."""
+    if not ENABLE_COVER_LETTERS:
+        # Defensive: feature off, but a stale button could still fire — do nothing.
+        return
+    job_id = job["id"]
+    await query.edit_message_text(
+        text=f"📝 Writing a cover letter for {job['title']} @ {job['company']}…",
+        disable_web_page_preview=True,
+    )
+    try:
+        # generate_cover_letter is a blocking Anthropic call — keep the event loop free.
+        cover_letter = await asyncio.to_thread(
+            generate_cover_letter,
+            job.get("title", ""),
+            job.get("company", ""),
+            job.get("description", "") or "",
+        )
+        set_cover_letter(job_id, cover_letter)
+    except Exception as e:
+        logger.error(f"Cover letter generation failed for job {job_id}: {e}")
+        await query.edit_message_text(
+            text=f"❌ Couldn't generate a cover letter for {job['title']} @ {job['company']}.",
+            reply_markup=_review_keyboard(job),
+            disable_web_page_preview=True,
+        )
+        return
+
+    # Re-offer Cover Letter (regenerate) + View Job so the card stays actionable.
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔁 Regenerate", callback_data=f"coverletter_{job_id}")],
+        [InlineKeyboardButton("🔗 View Job", url=job["url"])],
+    ])
+    await query.edit_message_text(
+        text=(
+            f"📄 Cover letter ready — {job['title']} @ {job['company']}\n"
+            f"🔗 {job['url']}\n\n"
+            f"Apply via the link and paste the letter below."
+        ),
+        reply_markup=keyboard,
+        disable_web_page_preview=True,
+    )
+    # Send the letter as a separate PLAIN-TEXT message (no Markdown) for clean copy/paste.
+    try:
+        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        await bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=f"📄 Cover letter for {job['title']} @ {job['company']} (copy/paste):\n\n{cover_letter}",
+        )
+    except Exception as e:
+        logger.error(f"Could not send cover letter for job {job_id}: {e}")
+
+
 async def _handle_reject(query, job: dict) -> None:
     reject_job(job["id"])
     _record_filter_outcome(job, "reject")
@@ -555,6 +644,7 @@ async def _handle_close(query, job: dict) -> None:
 _CALLBACK_HANDLERS = {
     "approve": _handle_approve,
     "applynow": _handle_applynow,
+    "coverletter": _handle_coverletter,
     "reject": _handle_reject,
     "followedup": _handle_followedup,
     "interviewing": _handle_interviewing,

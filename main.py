@@ -16,10 +16,13 @@ from config.settings import (
     CLASSIFY_CONCURRENCY,
     DB_BACKUP_DIR,
     DB_PATH,
+    ENABLE_AUTO_APPLY,
+    ENABLE_BROWSER_SCRAPERS,
     ENABLE_LLM_SPONSOR_SCORING,
     FOLLOWUP_SCHEDULE_HOUR,
     HUNT_SCHEDULE_HOUR,
     HUNT_SCHEDULE_MINUTE,
+    HUNTER_PROFILES,
     LOCATIONS,
     LOG_LEVEL,
     MAX_APPLIES_PER_RUN,
@@ -86,25 +89,38 @@ install_redaction(logging.getLogger(), quiet_chatty=True)
 logger = logging.getLogger("hunter")
 
 
-async def _scrape_all() -> list[dict]:
-    """Run every enabled scraper. Skips scrapers stuck on zero-yield streaks."""
-    # Order is by expected survival rate, because both the collection ceiling here
-    # and the reviewable-job budget in _classify_and_store are filled in this order.
-    # Highest-survival first: remote-only boards, then ATS sources that expose a
-    # structured remote flag (Ashby isRemote / Lever workplaceType / Recruitee /
-    # SmartRecruiters). The text-only Greenhouse catalog (no remote field → most
-    # roles read as not-remote) and the flaky browser scraper go last so they don't
-    # starve the better sources. Each source returns up to SOURCE_FETCH_CAP.
-    scrapers = [
+def _build_scrapers() -> list:
+    """Construct the enabled scraper instances in survival-rate order.
+
+    Order matters: both the collection ceiling in _scrape_all and the reviewable-job
+    budget in _classify_and_store are filled in this order. Highest-survival first:
+    remote-only boards, then ATS sources that expose a structured remote flag (Ashby
+    isRemote / Lever workplaceType / Recruitee). The text-only Greenhouse catalog
+    (no remote field → most roles read as not-remote) and the flaky browser scraper
+    go last so they don't starve the better sources.
+
+    Browser scrapers (RemoteOK, Wellfound) launch Chromium; ENABLE_BROWSER_SCRAPERS=false
+    runs API-only (lighter RAM — e.g. a co-located cover-letter-only profile).
+    """
+    scrapers: list = []
+    if ENABLE_BROWSER_SCRAPERS:
+        scrapers.append(RemoteOKScraper(headless=True))   # remote-only, browser
+    scrapers += [
         # LinkedInScraper(headless=True),  # Disabled - session-cookie issues; kept for Phase 3 hybrid apply
-        RemoteOKScraper(headless=True),   # remote-only
         WeWorkRemotelySource(),           # remote-only
         AshbySource(),                    # structured isRemote / workplaceType
         LeverSource(),                    # structured workplaceType
         RecruiteeSource(),                # structured remote flag
         GreenhouseSource(),               # text-only remote detection (no API flag)
-        WellfoundScraper(headless=True),  # browser, fragile
     ]
+    if ENABLE_BROWSER_SCRAPERS:
+        scrapers.append(WellfoundScraper(headless=True))  # browser, fragile
+    return scrapers
+
+
+async def _scrape_all() -> list[dict]:
+    """Run every enabled scraper. Skips scrapers stuck on zero-yield streaks."""
+    scrapers = _build_scrapers()
     fetch_cap = max(1, SOURCE_FETCH_CAP)
     # Bound total raw collection so a quiet filter run can't OOM the box; the
     # classifier stops at MAX_JOBS_PER_DAY fresh regardless.
@@ -246,6 +262,10 @@ async def hunt():
 
 async def apply():
     """Apply to all approved jobs."""
+    if not ENABLE_AUTO_APPLY:
+        logger.info("Auto-apply is disabled for this profile (ENABLE_AUTO_APPLY=false).")
+        return {"total": 0, "success": 0, "failed": 0, "needs_manual": 0}
+
     approved = get_approved_jobs()
     if not approved:
         logger.info("No approved jobs to apply to")
@@ -392,6 +412,12 @@ async def bot():
     async def cmd_apply(update, context):
         if not _is_authorized(update):
             return
+        if not ENABLE_AUTO_APPLY:
+            await update.message.reply_text(
+                "Auto-apply is disabled for this profile. Tap 📄 Cover Letter on a job "
+                "and apply yourself via the link."
+            )
+            return
         approved = get_approved_jobs()
         if not approved:
             await update.message.reply_text("No approved jobs. Review pending jobs first!")
@@ -504,6 +530,39 @@ async def bot():
         logger.info("Shutdown complete.")
 
 
+def run_all_profiles():
+    """Supervisor: run one `bot` process per profile in HUNTER_PROFILES.
+
+    Lets a single machine host several independent bots (e.g. Utku's PM hunt + a
+    friend's marketing hunt) from one checkout — each child gets its own
+    HUNTER_PROFILE, which loads its own `.env.<profile>` overlay and DB. An empty
+    entry ("") means the default (no-profile) bot. SIGINT/SIGTERM is forwarded so
+    every child shuts down gracefully.
+    """
+    import os
+    import subprocess
+
+    procs: list[subprocess.Popen] = []
+    for profile in HUNTER_PROFILES:
+        child_env = {**os.environ, "HUNTER_PROFILE": profile}
+        label = profile or "default"
+        logger.info(f"Starting bot process for profile '{label}'...")
+        procs.append(subprocess.Popen([sys.executable, str(BASE_DIR / "main.py"), "bot"], env=child_env))
+
+    def _forward(sig, _frame):
+        logger.info(f"Supervisor received signal {sig}; forwarding to {len(procs)} child(ren)...")
+        for p in procs:
+            p.send_signal(sig)
+
+    signal.signal(signal.SIGINT, _forward)
+    signal.signal(signal.SIGTERM, _forward)
+
+    exit_code = 0
+    for p in procs:
+        exit_code = p.wait() or exit_code
+    sys.exit(exit_code)
+
+
 def backup_database():
     """Create a timestamped copy of the SQLite database."""
     if not DB_PATH.exists():
@@ -559,11 +618,18 @@ Usage:
   python main.py followup   - Send follow-up reminders
   python main.py stats      - Show statistics
   python main.py bot        - Run interactive Telegram bot (with scheduler)
+  python main.py bot-all    - Run one bot per profile in HUNTER_PROFILES
   python main.py backup     - Backup the database
         """)
         return
 
     command = sys.argv[1].lower()
+
+    # Supervisor: spawns child `bot` processes, so it validates nothing itself
+    # (each child validates its own profile config on startup).
+    if command == "bot-all":
+        run_all_profiles()
+        return
 
     commands = {
         "hunt": hunt,
@@ -576,7 +642,7 @@ Usage:
 
     if command not in commands:
         print(f"Unknown command: {command}")
-        print("Available: hunt, apply, followup, stats, bot, backup")
+        print("Available: hunt, apply, followup, stats, bot, bot-all, backup")
         return
 
     # Validate config before running
