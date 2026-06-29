@@ -285,12 +285,16 @@ WEWORKREMOTELY_FEEDS = _csv_list(
 # Resume text — loaded from file at runtime, NOT hardcoded in source.
 # The "missing resume" warning is emitted from validate_config(), not at import,
 # so it doesn't spam during tests or unrelated CLI commands. A profile-specific
-# file (config/resume.<profile>.txt) is preferred so one profile's resume can't
-# shadow another's; then the shared config/resume.txt; then the RESUME_TEXT env.
+# file (resume.<profile>.txt) is preferred so one profile's resume can't shadow
+# another's; then the shared resume.txt; then the RESUME_TEXT env. Each file is
+# looked for under config/ (committed-style local path) and on the /data volume
+# (prod: uploaded out-of-band, like .env.<profile> — keeps PII off git/secrets).
 _resume_candidates = []
 if HUNTER_PROFILE:
     _resume_candidates.append(BASE_DIR / "config" / f"resume.{HUNTER_PROFILE}.txt")
+    _resume_candidates.append(Path("/data") / f"resume.{HUNTER_PROFILE}.txt")
 _resume_candidates.append(BASE_DIR / "config" / "resume.txt")
+_resume_candidates.append(Path("/data") / "resume.txt")
 RESUME_TEXT = os.getenv("RESUME_TEXT", "")
 for _resume_file in _resume_candidates:
     if _resume_file.exists():

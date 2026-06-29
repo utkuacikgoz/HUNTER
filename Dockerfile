@@ -36,4 +36,7 @@ USER hunter
 VOLUME ["/app/config", "/app/screenshots"]
 
 ENTRYPOINT ["python", "main.py"]
-CMD ["bot"]
+# bot-all runs one supervised bot process per profile in HUNTER_PROFILES (set in
+# fly.toml). With HUNTER_PROFILES unset it's just the single default bot, so this
+# is safe for a single-profile deploy too.
+CMD ["bot-all"]
