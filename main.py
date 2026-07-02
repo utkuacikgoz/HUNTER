@@ -12,6 +12,8 @@ from logging.handlers import RotatingFileHandler
 from applicant.engine import apply_to_approved_jobs
 from config.log_redaction import install_redaction
 from config.settings import (
+    BACKUP_SCHEDULE_HOUR,
+    BACKUP_SCHEDULE_MINUTE,
     BASE_DIR,
     CLASSIFY_CONCURRENCY,
     DB_BACKUP_DIR,
@@ -28,6 +30,8 @@ from config.settings import (
     MAX_APPLIES_PER_RUN,
     MAX_JOBS_PER_DAY,
     MAX_QUERIES_PER_RUN,
+    PRUNE_SCHEDULE_HOUR,
+    PRUNE_SCHEDULE_MINUTE,
     SCRAPER_SKIP_AFTER_ZEROS,
     SEARCH_QUERIES,
     SOURCE_FETCH_CAP,
@@ -381,13 +385,13 @@ async def bot():
     )
     scheduler.add_job(
         scheduled_backup,
-        CronTrigger(hour=3, minute=0),
+        CronTrigger(hour=BACKUP_SCHEDULE_HOUR, minute=BACKUP_SCHEDULE_MINUTE),
         id="daily_backup",
         replace_existing=True,
     )
     scheduler.add_job(
         scheduled_screenshot_prune,
-        CronTrigger(hour=3, minute=30),
+        CronTrigger(hour=PRUNE_SCHEDULE_HOUR, minute=PRUNE_SCHEDULE_MINUTE),
         id="daily_screenshot_prune",
         replace_existing=True,
     )

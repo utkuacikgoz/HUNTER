@@ -48,3 +48,32 @@ class TestBackupFunction:
     def test_backup_database_importable(self):
         from main import backup_database
         assert callable(backup_database)
+
+
+class TestScheduleSettings:
+    """Backup/prune times are configurable so they can be moved into the active
+    window when the machine scales to zero overnight (hunter-window.yml)."""
+
+    def test_schedule_times_are_valid(self):
+        from config.settings import (
+            BACKUP_SCHEDULE_HOUR,
+            BACKUP_SCHEDULE_MINUTE,
+            PRUNE_SCHEDULE_HOUR,
+            PRUNE_SCHEDULE_MINUTE,
+        )
+        for h in (BACKUP_SCHEDULE_HOUR, PRUNE_SCHEDULE_HOUR):
+            assert isinstance(h, int) and 0 <= h <= 23
+        for m in (BACKUP_SCHEDULE_MINUTE, PRUNE_SCHEDULE_MINUTE):
+            assert isinstance(m, int) and 0 <= m <= 59
+
+    def test_schedule_defaults_preserve_always_on_behavior(self):
+        # Defaults keep the original 03:00 / 03:30 (fine when running 24/7);
+        # production overrides them into the window via fly.toml [env].
+        from config.settings import (
+            BACKUP_SCHEDULE_HOUR,
+            BACKUP_SCHEDULE_MINUTE,
+            PRUNE_SCHEDULE_HOUR,
+            PRUNE_SCHEDULE_MINUTE,
+        )
+        assert (BACKUP_SCHEDULE_HOUR, BACKUP_SCHEDULE_MINUTE) == (3, 0)
+        assert (PRUNE_SCHEDULE_HOUR, PRUNE_SCHEDULE_MINUTE) == (3, 30)
