@@ -213,6 +213,26 @@ VELOCITY_HOT_THRESHOLD = int(os.getenv("VELOCITY_HOT_THRESHOLD", "3"))
 # When true, rank pending jobs from hot companies above the rest.
 VELOCITY_BOOST_RANK = os.getenv("VELOCITY_BOOST_RANK", "true").strip().lower() in {"1", "true", "yes", "y"}
 
+# Chromium launch args shared by every headless-browser call site (the scrapers
+# in scraper/base.py and the apply engine in applicant/engine.py). Keep this the
+# single source of truth so both stay in sync.
+#   --disable-dev-shm-usage: the container's /dev/shm is only 64MB; without this
+#     Chromium overruns it and the renderer crashes/OOMs (root cause of the bot
+#     dying and being restarted). Spills to /tmp instead. This is what makes a
+#     sub-1GB VM safe — do not drop it.
+#   --disable-gpu / --disable-extensions / --disable-background-networking: trim
+#     memory and startup work; there is no GPU or extension in this VM anyway.
+# NOTE: intentionally NOT --no-sandbox — Chromium launches fine as the non-root
+# `hunter` user, and disabling the sandbox would weaken isolation while browsing
+# untrusted job pages. Only add it if a sandbox launch error actually appears.
+CHROMIUM_LAUNCH_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--disable-extensions",
+    "--disable-background-networking",
+]
+
 # --- Anti-detection ---
 SCRAPE_DELAY_MIN = float(os.getenv("SCRAPE_DELAY_MIN", "2.0"))
 SCRAPE_DELAY_MAX = float(os.getenv("SCRAPE_DELAY_MAX", "5.0"))

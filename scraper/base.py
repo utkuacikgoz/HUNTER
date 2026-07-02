@@ -18,6 +18,7 @@ from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from config.settings import (
+    CHROMIUM_LAUNCH_ARGS,
     PROXY_URL,
     ROLE_EXCLUDE_KEYWORDS,
     ROLE_MATCH_KEYWORDS,
@@ -105,7 +106,7 @@ class BrowserSource(JobSource):
         self._playwright = await async_playwright().start()
         launch_kwargs = {
             "headless": self.headless,
-            "args": ["--disable-blink-features=AutomationControlled"],
+            "args": CHROMIUM_LAUNCH_ARGS,
         }
         if PROXY_URL:
             parsed = urlparse(PROXY_URL)
