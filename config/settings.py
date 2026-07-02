@@ -247,9 +247,20 @@ USER_AGENTS = [
 ]
 
 # --- Schedule ---
+# All times are in the scheduler's timezone, which is the container's TZ. In
+# production TZ is unset, so these hours are UTC. If the machine is scaled to zero
+# outside an active window (see .github/workflows/hunter-window.yml), every job
+# below MUST fall inside that window or it silently never fires — the in-memory
+# jobstore does not replay runs missed while the process was stopped.
 HUNT_SCHEDULE_HOUR = int(os.getenv("HUNT_SCHEDULE_HOUR", "9"))
 HUNT_SCHEDULE_MINUTE = int(os.getenv("HUNT_SCHEDULE_MINUTE", "0"))
 FOLLOWUP_SCHEDULE_HOUR = int(os.getenv("FOLLOWUP_SCHEDULE_HOUR", "10"))
+# Backup + screenshot prune default to the small hours (fine when always-on);
+# override into the active window when the machine sleeps overnight.
+BACKUP_SCHEDULE_HOUR = int(os.getenv("BACKUP_SCHEDULE_HOUR", "3"))
+BACKUP_SCHEDULE_MINUTE = int(os.getenv("BACKUP_SCHEDULE_MINUTE", "0"))
+PRUNE_SCHEDULE_HOUR = int(os.getenv("PRUNE_SCHEDULE_HOUR", "3"))
+PRUNE_SCHEDULE_MINUTE = int(os.getenv("PRUNE_SCHEDULE_MINUTE", "30"))
 
 # --- Apply engine ---
 # Master switch for the whole auto-apply path. When false, the Telegram review UI

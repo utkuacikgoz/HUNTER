@@ -2,8 +2,12 @@
 #
 # This app is a single long-running worker (Telegram long-poll bot + APScheduler
 # cron). It has NO HTTP server, so there is no [http_service] / ports section.
-# State is SQLite on a persistent volume, so it must run as exactly ONE machine
-# that never auto-stops — do not scale it past 1.
+# State is SQLite on a persistent volume, so it must run as exactly ONE machine —
+# do not scale it past 1. It does NOT auto-stop on idle (no HTTP for the proxy to
+# gate on); instead .github/workflows/hunter-window.yml stops/starts the machine
+# on a schedule to scale it to zero overnight (active window 10:00–21:00 UTC =
+# 13:00–00:00 Europe/Istanbul). Because the in-memory jobstore can't replay runs
+# missed while stopped, every scheduled time below lives inside that window.
 #
 # ── Environment-variable architecture ───────────────────────────────────────
 # SECRETS (credentials + PII) → `fly secrets set`, encrypted, NEVER in this file:
@@ -49,6 +53,18 @@ primary_region = "iad"
   # volume). Each job is still human-approved in Telegram first. Set "true" to
   # pause real submits (dry-run / screenshot only).
   APPLY_DRY_RUN = "false"
+  # Scheduled-job times, in UTC (the scheduler's tz — TZ is unset here). They are
+  # placed ~1h after the 10:00 UTC wake so the machine is fully up (the GitHub
+  # Actions wake-cron can lag a few minutes) and finish before the 21:00 UTC stop.
+  # UTC → Istanbul: 11:00→14:00 hunt, 12:00→15:00 followup, 20:00→23:00 backup,
+  # 20:30→23:30 prune.
+  HUNT_SCHEDULE_HOUR = "11"
+  HUNT_SCHEDULE_MINUTE = "0"
+  FOLLOWUP_SCHEDULE_HOUR = "12"
+  BACKUP_SCHEDULE_HOUR = "20"
+  BACKUP_SCHEDULE_MINUTE = "0"
+  PRUNE_SCHEDULE_HOUR = "20"
+  PRUNE_SCHEDULE_MINUTE = "30"
   # Add any other non-secret overrides here, e.g.:
   #   MAX_JOBS_PER_DAY = "50"
 
