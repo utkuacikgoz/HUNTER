@@ -8,6 +8,7 @@ from playwright.async_api import Page, async_playwright
 
 from config.settings import (
     APPLY_DRY_RUN,
+    CHROMIUM_LAUNCH_ARGS,
     LINKEDIN_SESSION_COOKIE,
     MAX_APPLIES_PER_RUN,
     RESUME_PATH,
@@ -52,7 +53,7 @@ class AutoApplicant:
         self._playwright = await async_playwright().start()
         self._browser = await self._playwright.chromium.launch(
             headless=self.headless,
-            args=["--disable-blink-features=AutomationControlled"],
+            args=CHROMIUM_LAUNCH_ARGS,
         )
         return self
 
