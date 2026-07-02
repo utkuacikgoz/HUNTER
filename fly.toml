@@ -57,7 +57,12 @@ primary_region = "iad"
   source = "hunter_data"
   destination = "/data"
 
-# Playwright/Chromium is memory-hungry; 1GB is the practical floor.
+# Playwright/Chromium is memory-hungry. 768MB is the floor now that the browser
+# launches with --disable-dev-shm-usage (see CHROMIUM_LAUNCH_ARGS in
+# config/settings.py) — without that flag Chromium overran the container's 64MB
+# /dev/shm and the renderer OOM'd, which is what forced the old 1GB. If you see
+# `Killed` / renderer crashes in `fly logs` under a real hunt+apply cycle, bump
+# back to "1gb"; only try "512mb" after watching a full cycle stay clean.
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "1gb"
+  memory = "768mb"
