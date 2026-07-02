@@ -1,0 +1,51 @@
+name: HUNTER active window
+
+# Scale HUNTER to zero overnight to save Fly compute + RAM (a stopped machine
+# bills neither; only its volume persists). HUNTER has no HTTP server, so Fly's
+# idle auto-stop can't gate it — we stop/start the machine on a schedule instead.
+#
+# Active window: 10:00–21:00 UTC (= 13:00–00:00 Europe/Istanbul; Turkey has no
+# DST, so the UTC offset is fixed). The scheduled jobs in fly.toml ([env]) fire
+# inside this window. Requires a repo secret FLY_API_TOKEN with access to the app
+# (create one with:  fly tokens create deploy -a hunter-whjqdw ).
+#
+# Reliability: START runs hourly and is idempotent, so a single skipped/late
+# GitHub cron tick self-heals on the next hour. STOP fires twice (21:00 + 22:00
+# UTC) so a missed stop only costs ~1 extra hour, not a whole night.
+
+on:
+  schedule:
+    - cron: '0 10-20 * * *'   # hourly 10:00–20:00 UTC -> ensure STARTED
+    - cron: '0 21,22 * * *'   # 21:00 & 22:00 UTC -> STOP (backstopped)
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Manually start or stop the machine
+        type: choice
+        options: [start, stop]
+        default: start
+
+concurrency:
+  group: hunter-window
+  cancel-in-progress: false
+
+jobs:
+  control:
+    runs-on: ubuntu-latest
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      FLY_APP: hunter-whjqdw
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Resolve the single machine id
+        id: mid
+        run: echo "id=$(flyctl machines list -a "$FLY_APP" --json | jq -r '.[0].id')" >> "$GITHUB_OUTPUT"
+
+      - name: Start (ensure up during the active window)
+        if: github.event.schedule == '0 10-20 * * *' || github.event.inputs.action == 'start'
+        run: flyctl machine start "${{ steps.mid.outputs.id }}" -a "$FLY_APP"
+
+      - name: Stop (scale to zero overnight)
+        if: github.event.schedule == '0 21,22 * * *' || github.event.inputs.action == 'stop'
+        run: flyctl machine stop "${{ steps.mid.outputs.id }}" -a "$FLY_APP"
