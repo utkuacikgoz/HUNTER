@@ -9,25 +9,42 @@ name: HUNTER active window
 # inside this window. Requires a repo secret FLY_API_TOKEN with access to the app
 # (create one with:  fly tokens create deploy -a hunter-whjqdw ).
 #
+# Multi-day pause: `ops/pause_until` (committed) holds an ISO date, or is empty.
+# While today < that date the hourly START is skipped so the machine stays off for
+# days at a time (cost/hygiene when nobody's hunting). A weekly Monday reminder
+# nudges us it's still off, and a hard backstop auto-resumes once today reaches the
+# date — the date is capped at +14 days so a pause can never silently outlive that.
+# The "still stopped" reminder must be sent from here (off-machine): a stopped
+# machine can't message us. Needs repo secrets TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID
+# (same values as the default profile's Fly secrets).
+#
 # Reliability: START runs hourly and is idempotent, so a single skipped/late
 # GitHub cron tick self-heals on the next hour. STOP fires twice (21:00 + 22:00
 # UTC) so a missed stop only costs ~1 extra hour, not a whole night.
 
 on:
   schedule:
-    - cron: '0 10-20 * * *'   # hourly 10:00–20:00 UTC -> ensure STARTED
+    - cron: '0 10-20 * * *'   # hourly 10:00–20:00 UTC -> ensure STARTED (unless paused)
     - cron: '0 21,22 * * *'   # 21:00 & 22:00 UTC -> STOP (backstopped)
+    - cron: '0 9 * * 1'       # Mon 09:00 UTC (12:00 Istanbul) -> weekly pause reminder
   workflow_dispatch:
     inputs:
       action:
-        description: Manually start or stop the machine
+        description: start / stop (one-off) · pause / resume (multi-day)
         type: choice
-        options: [start, stop]
+        options: [start, stop, pause, resume]
         default: start
+      days:
+        description: Pause length in days (pause only; clamped to 1–14)
+        type: string
+        default: '3'
 
 concurrency:
   group: hunter-window
   cancel-in-progress: false
+
+permissions:
+  contents: write   # commit pause state to ops/pause_until
 
 jobs:
   control:
@@ -35,17 +52,107 @@ jobs:
     env:
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       FLY_APP: hunter-whjqdw
+      TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
     steps:
+      - uses: actions/checkout@v4
+
       - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Read pause state
+        id: pause
+        run: |
+          f=ops/pause_until
+          pu=""
+          [ -f "$f" ] && pu="$(tr -d '[:space:]' < "$f")"
+          today="$(date -u +%F)"
+          is_paused=false
+          backstop=false
+          if [ -n "$pu" ]; then
+            if [[ "$today" < "$pu" ]]; then is_paused=true; else backstop=true; fi
+          fi
+          echo "paused_until=$pu"      >> "$GITHUB_OUTPUT"
+          echo "is_paused=$is_paused"  >> "$GITHUB_OUTPUT"
+          echo "backstop=$backstop"    >> "$GITHUB_OUTPUT"
+          echo "today=$today"          >> "$GITHUB_OUTPUT"
 
       - name: Resolve the single machine id
         id: mid
         run: echo "id=$(flyctl machines list -a "$FLY_APP" --json | jq -r '.[0].id')" >> "$GITHUB_OUTPUT"
 
-      - name: Start (ensure up during the active window)
-        if: github.event.schedule == '0 10-20 * * *' || github.event.inputs.action == 'start'
+      # --- multi-day pause (dispatch) ---
+      - name: Pause (dispatch)
+        if: github.event.inputs.action == 'pause'
+        env:
+          DAYS: ${{ github.event.inputs.days }}
+        run: |
+          days="${DAYS:-3}"
+          case "$days" in ''|*[!0-9]*) days=3 ;; esac
+          [ "$days" -lt 1 ] && days=1
+          [ "$days" -gt 14 ] && days=14
+          pu="$(date -u -d "+$days days" +%F)"
+          mkdir -p ops
+          echo "$pu" > ops/pause_until
+          git add ops/pause_until
+          git diff --cached --quiet || { git commit -m "ops: pause HUNTER until $pu"; git push origin "HEAD:${{ github.ref_name }}"; }
+          flyctl machine stop "${{ steps.mid.outputs.id }}" -a "$FLY_APP"
+          curl -sS -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TG_CHAT}" \
+            --data-urlencode "text=⏸ HUNTER paused until ${pu} (${days} gün). Resume: Actions → HUNTER active window → Run workflow → resume." >/dev/null || true
+
+      # --- resume / manual start (dispatch): clear any pause, then start ---
+      - name: Resume or manual start (dispatch)
+        if: github.event.inputs.action == 'resume' || github.event.inputs.action == 'start'
+        run: |
+          had_pause=false
+          if [ -s ops/pause_until ]; then had_pause=true; fi
+          : > ops/pause_until
+          git add ops/pause_until
+          git diff --cached --quiet || { git commit -m "ops: resume HUNTER"; git push origin "HEAD:${{ github.ref_name }}"; }
+          flyctl machine start "${{ steps.mid.outputs.id }}" -a "$FLY_APP"
+          if [ "$had_pause" = true ] || [ "${{ github.event.inputs.action }}" = resume ]; then
+            curl -sS -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${TG_CHAT}" \
+              --data-urlencode "text=▶️ HUNTER resumed." >/dev/null || true
+          fi
+
+      # --- scheduled START (hourly), gated by pause ---
+      - name: Paused — skip start (scheduled)
+        if: github.event.schedule == '0 10-20 * * *' && steps.pause.outputs.is_paused == 'true'
+        run: echo "HUNTER paused until ${{ steps.pause.outputs.paused_until }} — skipping start."
+
+      - name: Auto-resume — backstop reached (scheduled)
+        if: github.event.schedule == '0 10-20 * * *' && steps.pause.outputs.backstop == 'true'
+        run: |
+          : > ops/pause_until
+          git add ops/pause_until
+          git diff --cached --quiet || { git commit -m "ops: auto-resume HUNTER (pause backstop reached)"; git push origin "HEAD:${{ github.ref_name }}"; }
+          flyctl machine start "${{ steps.mid.outputs.id }}" -a "$FLY_APP"
+          curl -sS -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TG_CHAT}" \
+            --data-urlencode "text=▶️ HUNTER auto-resumed (pause backstop reached)." >/dev/null || true
+
+      - name: Start — active window (scheduled)
+        if: github.event.schedule == '0 10-20 * * *' && steps.pause.outputs.is_paused == 'false' && steps.pause.outputs.backstop == 'false'
         run: flyctl machine start "${{ steps.mid.outputs.id }}" -a "$FLY_APP"
 
-      - name: Stop (scale to zero overnight)
+      # --- scheduled STOP (overnight) or one-off dispatch stop ---
+      - name: Stop (scale to zero)
         if: github.event.schedule == '0 21,22 * * *' || github.event.inputs.action == 'stop'
         run: flyctl machine stop "${{ steps.mid.outputs.id }}" -a "$FLY_APP"
+
+      # --- weekly "still paused" reminder ---
+      - name: Weekly pause reminder
+        if: github.event.schedule == '0 9 * * 1' && steps.pause.outputs.is_paused == 'true'
+        run: |
+          pu="${{ steps.pause.outputs.paused_until }}"
+          today="${{ steps.pause.outputs.today }}"
+          left=$(( ( $(date -u -d "$pu" +%s) - $(date -u -d "$today" +%s) ) / 86400 ))
+          curl -sS -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TG_CHAT}" \
+            --data-urlencode "text=🟡 HUNTER still paused until ${pu} (${left} gün kaldı). Resume anytime: Actions → HUNTER active window → Run workflow → resume." >/dev/null || true
