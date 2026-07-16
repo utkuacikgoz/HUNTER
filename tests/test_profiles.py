@@ -76,6 +76,18 @@ class TestToggleDefaults:
         env = {k: v for k, v in os.environ.items() if k not in ("ENABLE_COVER_LETTERS", "HUNTER_PROFILE")}
         assert _settings_value("s.ENABLE_COVER_LETTERS", env) == "True"
 
+    def test_allow_onsite_freelance_default_false(self):
+        # Off by default: the PM bot's remote-only feed must not widen silently.
+        import os
+        env = {k: v for k, v in os.environ.items() if k not in ("ALLOW_ONSITE_FREELANCE", "HUNTER_PROFILE")}
+        assert _settings_value("s.ALLOW_ONSITE_FREELANCE", env) == "False"
+
+    def test_allow_onsite_freelance_parses_true(self):
+        import os
+        env = {**os.environ, "ALLOW_ONSITE_FREELANCE": "true"}
+        env.pop("HUNTER_PROFILE", None)
+        assert _settings_value("s.ALLOW_ONSITE_FREELANCE", env) == "True"
+
 
 class TestReviewKeyboardCoverLetterMode:
     def _texts(self, markup):
@@ -210,9 +222,13 @@ class TestBuildScrapers:
         import main
         monkeypatch.setattr(main, "ENABLE_BROWSER_SCRAPERS", False)
         names = {type(s).__name__ for s in main._build_scrapers()}
-        assert "RemoteOKScraper" not in names
+        # Wellfound is the only browser scraper.
         assert "WellfoundScraper" not in names
-        # API sources still present.
+        # API sources still present. RemoteOK is an ApiSource (aiohttp, no Chromium)
+        # despite the name, so this toggle must not disable it — it did until the
+        # ApiSource migration was finished, which silently killed REMOTEOK_TAGS for
+        # every browser-free profile.
+        assert "RemoteOKScraper" in names
         assert "GreenhouseSource" in names
 
     def test_includes_browser_scrapers_when_enabled(self, monkeypatch):
