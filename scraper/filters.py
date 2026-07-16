@@ -4,6 +4,10 @@ Verdicts:
 - include: confidently a fit (remote + allowed region + sponsor-friendly)
 - flag:    plausible fit but at least one unknown signal (yellow flag in Telegram)
 - drop:    clearly disqualified (US-only language, wrong region, on-site, blocklisted)
+
+ALLOW_ONSITE_FREELANCE exempts freelance/contract roles from the on-site drop, turning
+the feed into "remote OR freelance". Only that gate is exempted — region, country-lock
+and sponsor checks still apply.
 """
 from __future__ import annotations
 
@@ -14,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from config.settings import (
+    ALLOW_ONSITE_FREELANCE,
     CANDIDATE_WORK_REGIONS,
     REGION_ALLOWLIST,
     REMOTE_REQUIRED,
@@ -34,6 +39,8 @@ class JobVerdict:
     is_remote: bool
     sponsor_status: SponsorStatus
     verdict: Verdict
+    # Defaulted, so it sits after the required fields rather than next to is_remote.
+    is_freelance: bool = False
     reasons: list[str] = field(default_factory=list)
 
 
@@ -83,6 +90,33 @@ _TITLE_US_LOCK_TOKENS = {
 # Tokens that signal a remote role is open beyond a single country — so a US/Canada
 # mention alongside one of these is NOT a residence lock.
 _GLOBAL_REMOTE_TOKENS = {"worldwide", "anywhere", "global", "globally", "any country", "any location"}
+
+# Employment-type tokens, split by noise the same way _US_TOKENS / _US_LOC_ONLY are.
+# These phrases can only mean an employment type, so they're matched across
+# title + location + description. Stored already normalized (no punctuation): _normalize
+# turns "6-month contract" -> " 6 month contract " and "fixed-term" -> " fixed term ".
+# Deliberately excludes part-time / hourly — a schedule is not a contract type.
+_FREELANCE_TOKENS = {
+    "freelance role", "freelance position", "freelance basis", "freelance contract",
+    "freelance engagement", "freelance opportunity",
+    "contract role", "contract position", "contract basis", "contract engagement",
+    "contract opportunity", "contract assignment", "contract to hire",
+    "month contract", "months contract",
+    "fixed term", "fixed term contract",
+    "project based",
+    "interim role", "interim position", "interim basis",
+    "temporary contract", "temporary role", "temporary position",
+    "independent contractor", "self employed",
+    "consulting engagement",
+}
+# Bare words that mean an employment type in a TITLE but almost always mean something
+# else in a JD body: "contract negotiation" is a marketing skill, "fractional shares" is
+# a fintech product, "our consulting clients" is a company descriptor, "manage freelance
+# copywriters" is a duty, "in the interim" is prose. Title-only keeps those out.
+_FREELANCE_TITLE_ONLY = {
+    "freelance", "contract", "contractor", "consultant", "consulting", "consultancy",
+    "interim", "fractional", "temporary", "temp",
+}
 
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
@@ -134,6 +168,29 @@ def detect_remote(job: dict) -> bool:
         return flag
     hay = _haystack(job)
     return any(token in hay for token in _REMOTE_TOKENS)
+
+
+def detect_freelance(job: dict) -> bool:
+    """True when the posting reads as freelance / contract / interim work.
+
+    Unambiguous multi-word phrases match anywhere; the short ambiguous words in
+    _FREELANCE_TITLE_ONLY are trusted only in the title (see the token comments above).
+    Text-only by design — no source exposes a structured employment-type field today.
+
+    Known limit: a title like "Contract Manager" (a role *about* contracts) reads as
+    freelance. Unreachable in practice — ROLE_MATCH_KEYWORDS drops it upstream.
+
+    TODO: Lever exposes categories.commitment ("Full-time"/"Contract") and Ashby exposes
+    employmentType — ground truth rather than inference. Threading an employment_type
+    through _normalize_job would let this trust a source flag first, exactly as
+    detect_remote already does with is_remote.
+    """
+    if _has(_normalize(job.get("title")), _FREELANCE_TITLE_ONLY):
+        return True
+    full = _normalize(
+        f"{job.get('title') or ''} {job.get('location') or ''} {job.get('description') or ''}"
+    )
+    return _has(full, _FREELANCE_TOKENS)
 
 
 def detect_country_locked_remote(job: dict) -> str | None:
@@ -253,12 +310,16 @@ async def evaluate_job_async(
 
 def _evaluate_sync(job: dict) -> JobVerdict:
     reasons: list[str] = []
+    # Computed once and carried onto every verdict, including the hard drops, so the
+    # stored column stays answerable ("which freelance roles did we drop, and why?").
+    is_freelance = detect_freelance(job)
 
     blocker = detect_us_only_blocker(job)
     if blocker:
         return JobVerdict(
             region="us",
             is_remote=detect_remote(job),
+            is_freelance=is_freelance,
             sponsor_status="blocklist",
             verdict="drop",
             reasons=[f"us-only language: {blocker!r}"],
@@ -269,6 +330,7 @@ def _evaluate_sync(job: dict) -> JobVerdict:
         return JobVerdict(
             region=classify_region(job),
             is_remote=detect_remote(job),
+            is_freelance=is_freelance,
             sponsor_status="blocklist",
             verdict="drop",
             reasons=[f"company in blocklist: {job.get('company')!r}"],
@@ -276,13 +338,20 @@ def _evaluate_sync(job: dict) -> JobVerdict:
 
     is_remote = detect_remote(job)
     if REMOTE_REQUIRED and not is_remote:
-        return JobVerdict(
-            region=classify_region(job),
-            is_remote=False,
-            sponsor_status=sponsor,
-            verdict="drop",
-            reasons=["not marked remote"],
-        )
+        if not (ALLOW_ONSITE_FREELANCE and is_freelance):
+            return JobVerdict(
+                region=classify_region(job),
+                is_remote=False,
+                is_freelance=is_freelance,
+                sponsor_status=sponsor,
+                verdict="drop",
+                reasons=[
+                    "not remote and no freelance/contract signal"
+                    if ALLOW_ONSITE_FREELANCE
+                    else "not marked remote"
+                ],
+            )
+        reasons.append("on-site but freelance/contract — allowed")
 
     # Remote role locked to US/Canada (where the candidate can't work) -> drop.
     # Takes precedence over the sponsor allowlist: a US-locked posting won't take
@@ -293,6 +362,7 @@ def _evaluate_sync(job: dict) -> JobVerdict:
             return JobVerdict(
                 region=classify_region(job),
                 is_remote=True,
+                is_freelance=is_freelance,
                 sponsor_status=sponsor,
                 verdict="drop",
                 reasons=[f"remote locked to US/Canada (candidate is overseas): {locked!r}"],
@@ -303,6 +373,7 @@ def _evaluate_sync(job: dict) -> JobVerdict:
         return JobVerdict(
             region=region,
             is_remote=is_remote,
+            is_freelance=is_freelance,
             sponsor_status=sponsor,
             verdict="drop",
             reasons=["region outside allowlist"],
@@ -311,6 +382,7 @@ def _evaluate_sync(job: dict) -> JobVerdict:
         return JobVerdict(
             region=region,
             is_remote=is_remote,
+            is_freelance=is_freelance,
             sponsor_status=sponsor,
             verdict="drop",
             reasons=[f"region {region} not in REGION_ALLOWLIST"],
@@ -322,6 +394,7 @@ def _evaluate_sync(job: dict) -> JobVerdict:
         return JobVerdict(
             region=region,
             is_remote=is_remote,
+            is_freelance=is_freelance,
             sponsor_status="allowlist",
             verdict="include",
             reasons=reasons or ["allowlist match"],
@@ -334,6 +407,7 @@ def _evaluate_sync(job: dict) -> JobVerdict:
     return JobVerdict(
         region=region,
         is_remote=is_remote,
+        is_freelance=is_freelance,
         sponsor_status=sponsor,
         verdict="flag",
         reasons=reasons,

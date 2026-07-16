@@ -54,7 +54,11 @@ def format_job_message(job: dict, index: int = 0) -> str:
 
     verdict = job.get("filter_verdict")
     region = _REGION_LABEL.get(job.get("region") or "", "?")
-    remote_tag = "Remote" if job.get("is_remote") else "On-site"
+    tags = ["Remote" if job.get("is_remote") else "On-site"]
+    if job.get("is_freelance"):
+        # Why an on-site job is in a remote feed: ALLOW_ONSITE_FREELANCE let it through.
+        tags.append("Freelance")
+    remote_tag = " · ".join(tags)
     badge = _VERDICT_BADGE.get(verdict) if verdict else None
     flag_line = f"{_escape_md(badge)}\n" if badge else ""
     region_line = f"🌍 {_escape_md(f'{region} · {remote_tag}')}\n" if verdict else ""

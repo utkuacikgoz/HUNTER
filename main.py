@@ -205,6 +205,7 @@ async def _classify_and_store(jobs: list[dict]) -> tuple[int, dict[str, int]]:
                 description=job.get("description", ""),
                 region=verdict.region,
                 is_remote=verdict.is_remote,
+                is_freelance=verdict.is_freelance,
                 sponsor_status=verdict.sponsor_status,
                 filter_verdict=verdict.verdict,
                 filter_reasons="; ".join(verdict.reasons)[:500] if verdict.reasons else None,

@@ -114,6 +114,32 @@ class TestFormatJobMessage:
         assert "Sponsor" not in msg
         assert "Unclear" not in msg
 
+    def test_onsite_freelance_shows_both_tags(self):
+        # Why an on-site job is in a remote-only feed: it got in via the freelance
+        # exemption, and the card has to say so (it never renders filter_reasons).
+        job = {
+            "title": "Freelance Marketing Consultant", "company": "Co",
+            "location": "Istanbul, Turkey", "salary": "",
+            "url": "https://example.com/j", "platform": "greenhouse", "id": 6,
+            "filter_verdict": "flag", "region": "emea",
+            "is_remote": 0, "is_freelance": 1,
+        }
+        msg = format_job_message(job, 1)
+        assert "On\\-site" in msg
+        assert "Freelance" in msg
+
+    def test_non_freelance_shows_no_freelance_tag(self):
+        # Guards against an unconditional label.
+        job = {
+            "title": "PM", "company": "Co", "location": "Remote", "salary": "",
+            "url": "https://example.com/j", "platform": "greenhouse", "id": 7,
+            "filter_verdict": "flag", "region": "eu",
+            "is_remote": 1, "is_freelance": 0,
+        }
+        msg = format_job_message(job, 1)
+        assert "Remote" in msg
+        assert "Freelance" not in msg
+
 
 class TestFormatApplyResult:
     """The apply-status message must be honest: only a confirmed submit is a
