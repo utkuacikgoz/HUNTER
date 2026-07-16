@@ -29,8 +29,11 @@ Pipeline: **scrape → filter/classify → store → Telegram review → apply �
   - [filters.py](scraper/filters.py): `evaluate_job_async` → verdict `include` / `flag` / `drop`.
 - [tracker/database.py](tracker/database.py) — SQLite access. Auto-migrates by adding
   missing columns; WAL mode. DB at `hunter.db` (override with `DB_PATH`).
-- [prompts/generator.py](prompts/generator.py) — Claude cover-letter / answer generation
-  (model `claude-sonnet-4-20250514`). Falls back to a template if `ANTHROPIC_API_KEY` is unset.
+- [prompts/generator.py](prompts/generator.py) — Claude cover-letter / answer generation and
+  sponsor scoring. Three models, picked per task and set in [config/settings.py](config/settings.py)
+  (each overridable via env): `COVER_LETTER_MODEL` (strongest — low-volume, represents you to
+  employers), `CLAUDE_MODEL` (form answers), `SPONSOR_MODEL` (cheap yes/no classifier run on most
+  flagged jobs every hunt). Falls back to a template if `ANTHROPIC_API_KEY` is unset.
 - [applicant/engine.py](applicant/engine.py) — Playwright auto-apply engine.
 - [telegram_bot/bot.py](telegram_bot/bot.py) — Telegram review UI and apply worker queue.
 - [tests/](tests/) — pytest suite (asyncio auto mode).
