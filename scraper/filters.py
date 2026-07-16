@@ -102,7 +102,7 @@ _FREELANCE_TOKENS = {
     "contract role", "contract position", "contract basis", "contract engagement",
     "contract opportunity", "contract assignment", "contract to hire",
     "month contract", "months contract",
-    "fixed term", "fixed term contract",
+    "fixed term",   # subsumes "fixed term contract" — padded matching catches both
     "project based",
     "interim role", "interim position", "interim basis",
     "temporary contract", "temporary role", "temporary position",
