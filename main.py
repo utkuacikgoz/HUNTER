@@ -103,14 +103,13 @@ def _build_scrapers() -> list:
     (no remote field → most roles read as not-remote) and the flaky browser scraper
     go last so they don't starve the better sources.
 
-    Browser scrapers (RemoteOK, Wellfound) launch Chromium; ENABLE_BROWSER_SCRAPERS=false
-    runs API-only (lighter RAM — e.g. a co-located cover-letter-only profile).
+    Wellfound is the only browser scraper left (it launches Chromium);
+    ENABLE_BROWSER_SCRAPERS=false runs API-only (lighter RAM — e.g. a co-located
+    cover-letter-only profile).
     """
-    scrapers: list = []
-    if ENABLE_BROWSER_SCRAPERS:
-        scrapers.append(RemoteOKScraper(headless=True))   # remote-only, browser
-    scrapers += [
+    scrapers: list = [
         # LinkedInScraper(headless=True),  # Disabled - session-cookie issues; kept for Phase 3 hybrid apply
+        RemoteOKScraper(),                # remote-only, API (no browser)
         WeWorkRemotelySource(),           # remote-only
         AshbySource(),                    # structured isRemote / workplaceType
         LeverSource(),                    # structured workplaceType
@@ -205,6 +204,7 @@ async def _classify_and_store(jobs: list[dict]) -> tuple[int, dict[str, int]]:
                 description=job.get("description", ""),
                 region=verdict.region,
                 is_remote=verdict.is_remote,
+                is_freelance=verdict.is_freelance,
                 sponsor_status=verdict.sponsor_status,
                 filter_verdict=verdict.verdict,
                 filter_reasons="; ".join(verdict.reasons)[:500] if verdict.reasons else None,

@@ -84,6 +84,13 @@ def _bool(env_name: str, default: bool) -> bool:
 # --- Region / sponsor filtering ---
 REGION_ALLOWLIST = _csv_set("REGION_ALLOWLIST", "us,eu,emea")
 REMOTE_REQUIRED = os.getenv("REMOTE_REQUIRED", "true").strip().lower() in {"1", "true", "yes", "y"}
+# Exempt freelance/contract roles from the REMOTE_REQUIRED gate. With both on, the feed
+# reads "remote OR freelance": an on-site contract gig in the candidate's own city
+# survives, an on-site permanent role does not. Detection is text-only, title-first —
+# see scraper/filters.detect_freelance. No effect when REMOTE_REQUIRED is off (the gate
+# it modifies is already open). Only the remote gate is exempted: region, country-lock
+# and sponsor checks still apply.
+ALLOW_ONSITE_FREELANCE = _bool("ALLOW_ONSITE_FREELANCE", False)
 # Regions where the candidate can actually work (no sponsorship/relocation needed).
 # A remote role explicitly LOCKED to countries outside these regions (e.g.
 # "Remote - US only", "100% Remote (US/Canada)") is dropped — it won't accept an

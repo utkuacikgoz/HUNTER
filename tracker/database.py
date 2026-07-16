@@ -16,6 +16,7 @@ def get_connection():
 _FILTER_COLUMNS = (
     ("region", "TEXT"),
     ("is_remote", "INTEGER"),
+    ("is_freelance", "INTEGER"),
     ("sponsor_status", "TEXT"),
     ("filter_verdict", "TEXT"),
     ("filter_reasons", "TEXT"),
@@ -190,6 +191,7 @@ def insert_job(
     *,
     region: str | None = None,
     is_remote: bool | None = None,
+    is_freelance: bool | None = None,
     sponsor_status: str | None = None,
     filter_verdict: str | None = None,
     filter_reasons: str | None = None,
@@ -201,12 +203,14 @@ def insert_job(
         conn.execute(
             """INSERT OR IGNORE INTO jobs
                (title, company, location, salary, url, platform, description,
-                region, is_remote, sponsor_status, filter_verdict, filter_reasons, dedup_key)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                region, is_remote, is_freelance, sponsor_status, filter_verdict,
+                filter_reasons, dedup_key)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 title, company, location, salary, url, platform, description,
                 region,
                 int(is_remote) if is_remote is not None else None,
+                int(is_freelance) if is_freelance is not None else None,
                 sponsor_status, filter_verdict, filter_reasons, dedup_key,
             ),
         )

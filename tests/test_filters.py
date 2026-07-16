@@ -7,6 +7,7 @@ from scraper.filters import (
     check_sponsor_allowlist,
     classify_region,
     detect_country_locked_remote,
+    detect_freelance,
     detect_remote,
     detect_us_only_blocker,
     evaluate_job,
@@ -164,6 +165,52 @@ class TestDetectCountryLockedRemote:
         # On-site (no remote token, no is_remote flag) isn't a "locked remote" — handled
         # by the not-remote drop instead.
         assert detect_country_locked_remote({"location": "San Francisco, CA"}) is None
+
+
+class TestDetectFreelance:
+    """Employment type is inferred from text — no source exposes a structured field."""
+
+    # (title, description) — bare words count in the title, phrases count anywhere.
+    FREELANCE = [
+        ("Marketing Manager (6-month contract)", ""),
+        ("Freelance Marketing Consultant", ""),
+        ("Interim Head of Growth", ""),
+        ("Fractional CMO", ""),
+        ("Growth Marketer", "12-month fixed-term contract, Berlin office."),
+        ("Growth Marketer", "We need someone on a freelance basis."),
+        ("Growth Marketer", "This is a project-based engagement."),
+        ("Growth Marketer", "6 months contract, extendable."),
+    ]
+    # The same words in a JD body mean something else entirely — title-only scoping is
+    # what saves these.
+    NOT_FREELANCE = [
+        ("Growth Marketer", "You will own contract negotiation and vendor contract management."),
+        ("Growth Marketer", "Our consulting clients span EMEA."),
+        # The fintech-board false positive: Hakan scrapes monzo/n26/bitpanda, where
+        # "fractional shares" is a literal product feature.
+        ("Growth Marketer", "We offer fractional shares and equity."),
+        ("Growth Marketer", "In the interim, you will report to the CEO."),
+        # A duty ("manage freelancers"), not the role's own employment type.
+        ("Growth Marketer", "Manage freelance copywriters and designers."),
+        ("Growth Marketer", "Temporary access to our tools is provided."),
+        ("Growth Marketer", "Permanent, full-time, on-site in Istanbul."),
+        # Part-time / hourly is a schedule, not a contract type — deliberately excluded.
+        ("Part-time Marketing Manager", "Hourly rate."),
+    ]
+
+    @pytest.mark.parametrize(("title", "description"), FREELANCE)
+    def test_freelance(self, title, description):
+        assert detect_freelance({"title": title, "location": "", "description": description}) is True
+
+    @pytest.mark.parametrize(("title", "description"), NOT_FREELANCE)
+    def test_not_freelance(self, title, description):
+        assert detect_freelance({"title": title, "location": "", "description": description}) is False
+
+    def test_word_boundary_safety(self):
+        # "monthly contract value" is not " month contract "; padding keeps them apart.
+        assert detect_freelance(
+            {"title": "Growth Marketer", "description": "Grow monthly contracted revenue."}
+        ) is False
 
     def test_structured_remote_us_cities_is_locked(self):
         # The Figma case: structured is_remote=True with a bare US-cities location (no
@@ -370,10 +417,105 @@ class TestEvaluateJob:
     def test_verdict_dataclass_fields(self):
         v = JobVerdict(
             region="eu", is_remote=True, sponsor_status="allowlist",
-            verdict="include", reasons=["test"],
+            verdict="include", is_freelance=True, reasons=["test"],
         )
         assert v.region == "eu"
         assert v.reasons == ["test"]
+        assert v.is_freelance is True
+
+    def test_verdict_is_freelance_defaults_false(self):
+        v = JobVerdict(region="eu", is_remote=True, sponsor_status="unknown", verdict="flag")
+        assert v.is_freelance is False
+
+
+class TestAllowOnsiteFreelance:
+    """ALLOW_ONSITE_FREELANCE exempts freelance/contract roles from the on-site drop,
+    making the feed read "remote OR freelance" (the hakan profile). Only the remote gate
+    is exempted — region and sponsor checks still apply.
+    """
+
+    ONSITE_FREELANCE = {
+        "title": "Freelance Marketing Consultant",
+        "company": "FooCorp",
+        "location": "Istanbul, Turkey",
+        "description": "On-site in our Istanbul office.",
+    }
+
+    def test_onsite_freelance_survives_when_allowed(self, monkeypatch):
+        monkeypatch.setattr(filters, "REMOTE_REQUIRED", True)
+        monkeypatch.setattr(filters, "ALLOW_ONSITE_FREELANCE", True)
+        v = evaluate_job(self.ONSITE_FREELANCE)
+        assert v.verdict == "flag"
+        assert v.is_remote is False
+        assert v.is_freelance is True
+        assert v.region == "emea"
+        assert any("freelance/contract — allowed" in r for r in v.reasons)
+
+    def test_onsite_permanent_still_drops_when_freelance_allowed(self, monkeypatch):
+        monkeypatch.setattr(filters, "REMOTE_REQUIRED", True)
+        monkeypatch.setattr(filters, "ALLOW_ONSITE_FREELANCE", True)
+        v = evaluate_job({
+            "title": "Marketing Manager",
+            "company": "FooCorp",
+            "location": "Berlin, Germany",
+            "description": "Permanent role, on-site.",
+        })
+        assert v.verdict == "drop"
+        assert v.is_freelance is False
+        assert "no freelance/contract signal" in v.reasons[0]
+
+    def test_onsite_freelance_drops_when_not_allowed(self, monkeypatch):
+        # Default-behavior regression guard: with the toggle off (the default, and what
+        # the PM bot runs), an on-site freelance role drops exactly as it always did.
+        monkeypatch.setattr(filters, "REMOTE_REQUIRED", True)
+        monkeypatch.setattr(filters, "ALLOW_ONSITE_FREELANCE", False)
+        v = evaluate_job(self.ONSITE_FREELANCE)
+        assert v.verdict == "drop"
+        assert v.reasons[0] == "not marked remote"
+
+    def test_onsite_us_freelance_drops_on_region(self, monkeypatch):
+        # The exemption reopens the on-site door, so REGION_ALLOWLIST becomes the only
+        # thing keeping US on-site freelance out. Pins that against future refactors.
+        monkeypatch.setattr(filters, "REMOTE_REQUIRED", True)
+        monkeypatch.setattr(filters, "ALLOW_ONSITE_FREELANCE", True)
+        monkeypatch.setattr(filters, "REGION_ALLOWLIST", {"eu", "emea"})
+        v = evaluate_job({
+            "title": "Freelance Marketing Consultant",
+            "company": "FooCorp",
+            "location": "New York, NY",
+            "description": "On-site in our NYC office.",
+        })
+        assert v.verdict == "drop"
+        assert v.is_freelance is True
+        assert "not in REGION_ALLOWLIST" in v.reasons[0]
+
+    def test_remote_permanent_unaffected(self, monkeypatch):
+        # The exemption widens the gate; it must not narrow it for plain remote roles.
+        monkeypatch.setattr(filters, "REMOTE_REQUIRED", True)
+        monkeypatch.setattr(filters, "ALLOW_ONSITE_FREELANCE", True)
+        v = evaluate_job({
+            "title": "Growth Marketing Manager",
+            "company": "Stripe",
+            "location": "Remote, Europe",
+            "description": "Permanent role.",
+        })
+        assert v.verdict == "include"
+        assert v.is_remote is True
+        assert v.is_freelance is False
+
+    def test_us_only_blocker_beats_freelance_exemption(self, monkeypatch):
+        # The exemption is scoped to the remote gate only — it must not rescue a job
+        # that says outright it won't sponsor.
+        monkeypatch.setattr(filters, "REMOTE_REQUIRED", True)
+        monkeypatch.setattr(filters, "ALLOW_ONSITE_FREELANCE", True)
+        v = evaluate_job({
+            "title": "Freelance Marketing Consultant",
+            "company": "FooCorp",
+            "location": "Istanbul, Turkey",
+            "description": "No visa sponsorship.",
+        })
+        assert v.verdict == "drop"
+        assert "us-only language" in v.reasons[0]
 
 
 class TestEvaluateJobAsync:
