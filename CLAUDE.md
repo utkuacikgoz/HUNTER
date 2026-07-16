@@ -89,10 +89,14 @@ HUNTER_PROFILES=,hakan .venv/bin/python main.py bot-all  # supervisor: default +
 `.env.<name>.example` is the template. Relevant toggles: `ENABLE_AUTO_APPLY` (false →
 review UI drops Approve, `/apply` refuses), `ENABLE_COVER_LETTERS` (when auto-apply is
 off, false → pure job feed, true → adds a 📄 Cover Letter button), and
-`ENABLE_BROWSER_SCRAPERS` (false → API-only sources, no Chromium). `SEARCH_QUERIES`,
-`ROLE_MATCH_KEYWORDS`, `REMOTEOK_TAGS`, and `WEWORKREMOTELY_FEEDS` retarget the search
-(e.g. PM → marketing). The `hakan` profile (marketing, sourcing-only) is the worked
-example — see `.env.hakan.example`.
+`ENABLE_BROWSER_SCRAPERS` (false → API-only sources, no Chromium — only Wellfound is a
+browser scraper), and `ALLOW_ONSITE_FREELANCE` (with `REMOTE_REQUIRED=true` → feed reads
+"remote OR freelance"; exempts only the remote gate, region/sponsor checks still apply).
+`SEARCH_QUERIES`, `ROLE_MATCH_KEYWORDS`, `REMOTEOK_TAGS`, and `WEWORKREMOTELY_FEEDS`
+retarget the search (e.g. PM → marketing) — note `ROLE_MATCH_KEYWORDS` gates catalog
+titles *before* `filters.py` runs, and matches plain substrings. The `hakan` profile
+(marketing, sourcing-only, remote-or-freelance) is the worked example — see
+`.env.hakan.example`.
 
 ## Setup & common commands
 
@@ -108,7 +112,7 @@ python3 -m venv .venv
 Quality gates (mirror CI in [.github/workflows/ci.yml](.github/workflows/ci.yml)):
 
 ```bash
-.venv/bin/python -m pytest -q     # 168 tests
+.venv/bin/python -m pytest -q     # 331 tests
 .venv/bin/ruff check .            # lint
 .venv/bin/mypy                    # type check (files configured in pyproject.toml)
 ```
