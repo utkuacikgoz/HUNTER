@@ -2,7 +2,7 @@
 pytest==9.1.1
 pytest-asyncio==1.4.0
 pytest-cov==7.1.0
-ruff==0.15.20
-mypy==2.1.0
-pip-audit==2.10.0
+ruff==0.15.22
+mypy==2.3.0
+pip-audit==2.10.1
 types-pytz==2026.2.0.20260518
