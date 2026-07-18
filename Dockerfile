@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 # PLAYWRIGHT_BROWSERS_PATH installs browsers to a shared, world-readable path so
 # the non-root `hunter` runtime user finds them (root's ~/.cache would not be
