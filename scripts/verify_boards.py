@@ -29,10 +29,15 @@ from config.settings import (
 
 
 def _get(url: str):
+    # Board URLs come from config (hardcoded ATS tokens), never user input, but
+    # pin the scheme to http(s) so a malformed seed can't reach file:/ or a
+    # custom URL handler (bandit B310).
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"refusing non-http(s) board URL: {url!r}")
     req = urllib.request.Request(
         url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
     )
-    with urllib.request.urlopen(req, timeout=20) as r:
+    with urllib.request.urlopen(req, timeout=20) as r:  # nosec B310 — scheme pinned to http(s) above
         return json.load(r)
 
 

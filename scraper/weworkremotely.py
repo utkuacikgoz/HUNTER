@@ -8,7 +8,11 @@ broad (engineering/sales leak in), so the PM title filter is load-bearing.
 import html
 import logging
 import re
-import xml.etree.ElementTree as ET
+
+# defusedxml hardens the stdlib ElementTree parser against XXE / billion-laughs
+# entity-expansion attacks. The WeWorkRemotely RSS body is remote/untrusted, so
+# we never parse it with the raw stdlib parser (bandit B314).
+import defusedxml.ElementTree as ET
 
 from config.settings import WEWORKREMOTELY_FEEDS
 from scraper.base import ApiSource, matches_role_title

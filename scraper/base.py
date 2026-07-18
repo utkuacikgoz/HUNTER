@@ -29,7 +29,7 @@ from config.settings import (
 
 logger = logging.getLogger(__name__)
 
-_BLOCKED_PROXY_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "169.254.169.254", "metadata.google.internal"}
+_BLOCKED_PROXY_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "169.254.169.254", "metadata.google.internal"}  # nosec B104 — SSRF blocklist of hosts to reject, not a socket bind address
 
 _TITLE_NON_ALNUM = re.compile(r"[^a-z0-9]+")
 

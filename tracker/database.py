@@ -270,7 +270,7 @@ def get_pending_jobs(limit=50):
                    ELSE 2
                  END,
                  scraped_at DESC
-               LIMIT ?""",
+               LIMIT ?""",  # nosec B608 — the only interpolation, {acted}, is built from the hardcoded _ACTED_STATUSES literal above; no user input reaches this query
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
