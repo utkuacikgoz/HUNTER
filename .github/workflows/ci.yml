@@ -32,8 +32,28 @@ jobs:
       - name: Type check
         run: mypy
 
+      - name: Security lint (bandit)
+        # Medium+ severity only; the LOW noise (asserts, try/except/pass) and the
+        # three reviewed false positives are annotated with `# nosec` in-source.
+        run: bandit -q -r . -ll -x ./tests,./.venv
+
       - name: Dependency audit (CVEs)
         run: pip-audit -r requirements.lock
 
       - name: Test
         run: pytest -q --cov=. --cov-report=term-missing
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0   # scan full history, not just the tip
+      - name: Install gitleaks
+        run: |
+          VERSION=8.24.3
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" -o gl.tgz
+          tar -xzf gl.tgz gitleaks
+          sudo install gitleaks /usr/local/bin/gitleaks
+      - name: Scan (repo + history)
+        run: gitleaks detect --redact --exit-code 1
