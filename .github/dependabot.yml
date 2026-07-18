@@ -33,3 +33,11 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+    ignore:
+      # Bump the Python base image deliberately (verify native-dep wheels on slim
+      # first). Don't auto-jump to a brand-new major/minor (e.g. 3.14) that may
+      # lack wheels and break the build.
+      - dependency-name: "python"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
