@@ -612,7 +612,7 @@ def backup_database():
     DB_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     # Key the backup name on the DB stem so co-located profiles (hunter.db vs
-    # hunter_hakan.db) don't collide on the same-second timestamp. The prune glob
+    # hunter_<profile>.db) don't collide on the same-second timestamp. The prune glob
     # below ("hunter_*") still matches both stems.
     dest = DB_BACKUP_DIR / f"{DB_PATH.stem}_{timestamp}.db"
     import sqlite3
