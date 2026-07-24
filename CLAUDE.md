@@ -84,8 +84,8 @@ an **overlay on top of `.env`** (overlay wins), and prefers `config/resume.<name
 Give the profile its own `DB_PATH` and Telegram bot so the two never share state.
 
 ```
-HUNTER_PROFILE=hakan .venv/bin/python main.py bot        # one profile
-HUNTER_PROFILES=,hakan .venv/bin/python main.py bot-all  # supervisor: default + hakan
+HUNTER_PROFILE=friend .venv/bin/python main.py bot        # one profile
+HUNTER_PROFILES=,friend .venv/bin/python main.py bot-all  # supervisor: default + friend
 ```
 
 `.env.<name>` and `config/resume.<name>.txt` are gitignored (PII); a committed
@@ -97,9 +97,8 @@ browser scraper), and `ALLOW_ONSITE_FREELANCE` (with `REMOTE_REQUIRED=true` → 
 "remote OR freelance"; exempts only the remote gate, region/sponsor checks still apply).
 `SEARCH_QUERIES`, `ROLE_MATCH_KEYWORDS`, `REMOTEOK_TAGS`, and `WEWORKREMOTELY_FEEDS`
 retarget the search (e.g. PM → marketing) — note `ROLE_MATCH_KEYWORDS` gates catalog
-titles *before* `filters.py` runs, and matches plain substrings. The `hakan` profile
-(marketing, sourcing-only, remote-or-freelance) is the worked example — see
-`.env.hakan.example`.
+titles *before* `filters.py` runs, and matches plain substrings. A marketing,
+sourcing-only, remote-or-freelance profile is a typical use of these toggles.
 
 ## Setup & common commands
 

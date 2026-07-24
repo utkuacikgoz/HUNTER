@@ -33,12 +33,11 @@ primary_region = "iad"
   dockerfile = "Dockerfile"
 
 [env]
-  # Run two supervised bots on this one machine (CMD is `bot-all`): the default
-  # PM bot ("" = no profile) plus the "hakan" marketing profile. The hakan child
-  # loads its secrets/PII from /data/.env.hakan and /data/resume.hakan.txt
-  # (uploaded out-of-band to the volume, never in the image). Set to "" or drop
-  # this key to run only the default bot.
-  HUNTER_PROFILES = ",hakan"
+  # Comma-separated list of profiles the `bot-all` supervisor runs, one supervised
+  # bot each ("" = the default, no-profile bot). Each extra profile loads its
+  # secrets/PII from /data/.env.<name> and /data/resume.<name>.txt (uploaded
+  # out-of-band to the volume, never in the image). "" runs only the default bot.
+  HUNTER_PROFILES = ""
   # Point the DB at the mounted volume so it survives deploys/restarts.
   DB_PATH = "/data/hunter.db"
   # Résumé PDF lives on the persistent volume (uploaded out-of-band, off git).

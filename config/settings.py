@@ -22,7 +22,7 @@ if HUNTER_PROFILE:
 
 # Comma-separated profile names for the `bot-all` supervisor (see main.py). Unlike
 # other CSV settings, an EMPTY entry is meaningful — it denotes the default
-# (no-profile) bot — so we keep blanks: "" → [""], ",hakan" → ["", "hakan"].
+# (no-profile) bot — so we keep blanks: "" → [""], ",friend" → ["", "friend"].
 _raw_profiles = os.getenv("HUNTER_PROFILES")
 HUNTER_PROFILES = [p.strip() for p in _raw_profiles.split(",")] if _raw_profiles else [""]
 

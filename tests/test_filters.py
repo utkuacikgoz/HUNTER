@@ -186,7 +186,7 @@ class TestDetectFreelance:
     NOT_FREELANCE = [
         ("Growth Marketer", "You will own contract negotiation and vendor contract management."),
         ("Growth Marketer", "Our consulting clients span EMEA."),
-        # The fintech-board false positive: Hakan scrapes monzo/n26/bitpanda, where
+        # The fintech-board false positive: on fintech boards (monzo/n26/bitpanda),
         # "fractional shares" is a literal product feature.
         ("Growth Marketer", "We offer fractional shares and equity."),
         ("Growth Marketer", "In the interim, you will report to the CEO."),
@@ -430,8 +430,8 @@ class TestEvaluateJob:
 
 class TestAllowOnsiteFreelance:
     """ALLOW_ONSITE_FREELANCE exempts freelance/contract roles from the on-site drop,
-    making the feed read "remote OR freelance" (the hakan profile). Only the remote gate
-    is exempted — region and sponsor checks still apply.
+    making the feed read "remote OR freelance" (a remote-or-freelance profile). Only the
+    remote gate is exempted — region and sponsor checks still apply.
     """
 
     ONSITE_FREELANCE = {
