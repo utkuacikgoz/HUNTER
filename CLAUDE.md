@@ -123,6 +123,12 @@ CI installs from [requirements.lock](requirements.lock) and runs lint â†’ mypy â
 Python 3.12. `coverage fail_under = 40` is a regression ratchet, not a target (I/O-heavy
 paths can't be unit-tested without live services).
 
+`requirements.txt` holds direct pins; `requirements.lock` is the fully-pinned freeze CI
+and prod install. Dependabot bumps only `requirements.txt`, so CI runs
+[scripts/check_lock_sync.py](scripts/check_lock_sync.py) to fail when the two drift.
+After bumping `requirements.txt`, regenerate the lock:
+`pip install -r requirements.txt && pip freeze > requirements.lock`.
+
 ## Conventions
 
 - Python 3.12 target; ruff line-length 110 (E501 ignored). Type-checked with mypy
