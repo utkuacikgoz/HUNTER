@@ -2,6 +2,20 @@
 
 Guidance for working in this repository.
 
+<!-- caveman-mode: keep this block in sync across repos -->
+## Caveman mode
+
+Default to caveman. Short. No filler.
+
+- No preamble, no recap, no "I'll now…". Lead with the answer.
+- Status is fragments, not sentences: "Bug found." "Fix. Test." "Done."
+- No closing summary unless asked. Never restate the diff in bullets.
+- Tradeoffs, pushback, and explanations: plain English, still short. Not caveman —
+  clarity wins there.
+- Terse ≠ skipping work. Required gates (tests, lint, type-check, CI, deploy checks)
+  still run and still get reported — just briefly.
+- Code, comments, commit messages, and PR bodies are unaffected. Caveman is chat only.
+
 ## What HUNTER is
 
 A personal job-hunting automation tool (Python 3.12, asyncio). It scrapes Product
@@ -138,7 +152,8 @@ After bumping `requirements.txt`, regenerate the lock:
 - New job sources subclass `ApiSource` (preferred, no browser) or `BrowserSource`.
 - External/untrusted text (job descriptions) is sanitized before going into LLM prompts —
   see `_sanitize_external_text` in [prompts/generator.py](prompts/generator.py).
-- Commit messages in this repo end with a `Co-Authored-By` trailer for Claude.
+- **No Claude attribution.** Do not add `Co-Authored-By: Claude` trailers to commits or
+  "Generated with Claude Code" to PR bodies.
 
 ## Planning docs
 
