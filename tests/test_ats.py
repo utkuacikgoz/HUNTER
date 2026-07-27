@@ -38,7 +38,7 @@ class TestAtsCommon:
     def test_seeded_boards_by_default(self):
         assert "stripe" in GreenhouseSource().boards
         assert "spotify" in LeverSource().boards
-        assert "deel" in AshbySource().boards
+        assert "notion" in AshbySource().boards
 
     def test_tier23_boards_listed_before_tier1(self):
         # Tier-2/3 scale-ups must come first so they fill the per-run cap before giants.

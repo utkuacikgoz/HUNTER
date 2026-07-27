@@ -126,7 +126,7 @@ GREENHOUSE_BOARDS = _csv_list(
     "wallapop,gigs,contentful,typeform,planetscale,"
     # EU/EMEA-focused (hire product in EU/EMEA)
     "monzo,sumup,getyourguide,doctolib,celonis,wolt,n26,hellofresh,trustpilot,"
-    "skyscanner,unity3d,adyen,algolia,raisin,cleo,graphcore,freenow,consensys,"
+    "skyscanner,adyen,algolia,raisin,cleo,graphcore,freenow,consensys,"
     "intercom,dataiku,"
     # YC / well-known startups (region filter drops US-only)
     "brex,gusto,clickhouse,flexport,checkr,mixpanel,webflow,lithic,highnote,"
@@ -146,8 +146,8 @@ GREENHOUSE_US_BOARDS = _csv_list(
 )
 LEVER_BOARDS = _csv_list(
     "LEVER_BOARDS",
-    # live-verified 2026-06-08/09: mistral/contentsquare/younited + YC (metabase/finch)
-    "qonto,vestiairecollective,spotify,toptal,mistral,contentsquare,younited,"
+    # live-verified 2026-06-08/09: contentsquare/younited + YC (metabase/finch)
+    "qonto,vestiairecollective,spotify,toptal,contentsquare,younited,"
     "metabase,finch,"
     # live-verified 2026-06-22
     "matchgroup,swordhealth",
@@ -163,7 +163,7 @@ ASHBY_BOARDS = _csv_list(
     "zip,cohere,temporal,replit,watershed,airbyte,mux,render,baseten,neon,"
     "weaviate,pinecone,langchain,llamaindex,column,"
     # tier-1
-    "notion,1password,clickup,deel,n8n,linear,zapier,supabase,buffer,"
+    "notion,1password,clickup,n8n,linear,zapier,supabase,buffer,"
     # EU/EMEA + global-remote batch, live-verified 2026-07-28
     "elevenlabs,attio,checkly,revenuecat,kong,resend,mazedesign,infisical,"
     "junction,natter,phantom,assured",
