@@ -18,7 +18,7 @@ Default to caveman. Short. No filler.
 
 ## What HUNTER is
 
-A personal job-hunting automation tool (Python 3.12, asyncio). It scrapes Product
+A personal job-hunting automation tool (Python 3.13, asyncio). It scrapes Product
 Manager roles from several sources, filters them by region / remote / visa-sponsor
 signals, pushes candidates to a Telegram bot for human review, then auto-applies to
 approved jobs with Playwright and Claude-generated cover letters. State lives in a
@@ -128,13 +128,13 @@ python3 -m venv .venv
 Quality gates (mirror CI in [.github/workflows/ci.yml](.github/workflows/ci.yml)):
 
 ```bash
-.venv/bin/python -m pytest -q     # 331 tests
+.venv/bin/python -m pytest -q     # 341 tests
 .venv/bin/ruff check .            # lint
 .venv/bin/mypy                    # type check (files configured in pyproject.toml)
 ```
 
 CI installs from [requirements.lock](requirements.lock) and runs lint → mypy → pytest on
-Python 3.12. `coverage fail_under = 40` is a regression ratchet, not a target (I/O-heavy
+Python 3.13 — the same minor version the Docker image (and therefore prod) runs. `coverage fail_under = 40` is a regression ratchet, not a target (I/O-heavy
 paths can't be unit-tested without live services).
 
 `requirements.txt` holds direct pins; `requirements.lock` is the fully-pinned freeze CI
@@ -145,7 +145,7 @@ After bumping `requirements.txt`, regenerate the lock:
 
 ## Conventions
 
-- Python 3.12 target; ruff line-length 110 (E501 ignored). Type-checked with mypy
+- Python 3.13 target; ruff line-length 110 (E501 ignored). Type-checked with mypy
   (`telegram_bot.bot` relaxes two telegram-Optional noise codes — see pyproject.toml).
 - Config is centralized in `config/settings.py`; don't read `os.getenv` elsewhere — add a
   setting there and import it.

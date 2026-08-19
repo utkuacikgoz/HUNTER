@@ -1,5 +1,8 @@
 """Tests for applicant/engine.py structured apply: field resolution, LLM answers,
 and the submit-and-confirm gate (only marks success on a real confirmation)."""
+import asyncio
+import time
+
 import applicant.engine as engine_mod
 from applicant.engine import AutoApplicant
 
@@ -12,6 +15,7 @@ class FakeElement:
         self.filled = None
         self.clicked = False
         self.uploaded = None
+        self.on_click = None  # optional coroutine: simulate the page navigating
 
     async def fill(self, v):
         self.filled = v
@@ -19,6 +23,8 @@ class FakeElement:
 
     async def click(self):
         self.clicked = True
+        if self.on_click is not None:
+            await self.on_click()
 
     async def set_input_files(self, p):
         self.uploaded = p
@@ -35,13 +41,28 @@ class FakeElement:
         return self._attrs.get("label", "")
 
 
+class _FakeKeyboard:
+    def __init__(self):
+        self.pressed = []
+
+    async def press(self, key):
+        self.pressed.append(key)
+
+
 class FakePage:
     """Minimal Playwright Page stand-in: maps selectors -> element(s)."""
-    def __init__(self, mapping=None, url="https://example.com/apply", all_fields=None):
+    def __init__(self, mapping=None, url="https://example.com/apply", all_fields=None,
+                 missing_required=None):
         self._mapping = mapping or {}
         self.url = url
         self._all = all_fields or []
         self.screenshotted = False
+        # What _missing_required_fields' page.evaluate() returns.
+        self.missing_required = missing_required or []
+        self.keyboard = _FakeKeyboard()
+
+    async def evaluate(self, script, *args):
+        return self.missing_required
 
     async def query_selector(self, sel):
         return self._mapping.get(sel)
@@ -104,7 +125,12 @@ class TestSubmitAndConfirm:
 
     async def test_confirmed_by_url(self, monkeypatch):
         btn = FakeElement()
-        page = FakePage({"#submit": btn}, url="https://boards.greenhouse.io/x/thank-you")
+        page = FakePage({"#submit": btn}, url="https://x/apply")
+
+        async def click_navigates():
+            page.url = "https://boards.greenhouse.io/x/thank-you"
+
+        btn.on_click = click_navigates
         res = await self._run(page, monkeypatch, dry_run=False)
         assert btn.clicked is True
         assert res.success is True
@@ -117,12 +143,32 @@ class TestSubmitAndConfirm:
         assert res.success is True
 
     async def test_submitted_but_unconfirmed_is_not_success(self, monkeypatch):
+        monkeypatch.setattr(engine_mod, "CONFIRM_TIMEOUT_S", 0.2)
         page = FakePage({"#submit": FakeElement()}, url="https://x/apply")
         res = await self._run(page, monkeypatch, dry_run=False)
         assert res.success is False
+        # Its own method: the caller records it and refuses to auto-resubmit.
+        assert res.method == "submitted_unconfirmed"
+
+    async def test_required_gap_blocks_submit(self, monkeypatch):
+        # An incomplete form is never submitted: the ATS would reject it, and a
+        # half-filled application under the candidate's name is worse than none.
+        btn = FakeElement()
+        page = FakePage({"#submit": btn}, url="https://x/apply",
+                        missing_required=["Work Authorisation Status", "Country"])
+        res = await self._run(page, monkeypatch, dry_run=False)
+        assert btn.clicked is False
+        assert res.success is False
         assert res.method == "form_filled"
+        assert "Work Authorisation Status" in res.message
+
+    async def test_dry_run_reports_required_gaps(self, monkeypatch):
+        page = FakePage({"#submit": FakeElement()}, missing_required=["Country"])
+        res = await self._run(page, monkeypatch, dry_run=True)
+        assert "Country" in res.message
 
     async def test_no_submit_button_is_not_success(self, monkeypatch):
+        monkeypatch.setattr(engine_mod, "CONFIRM_TIMEOUT_S", 0.2)
         page = FakePage({}, url="https://x/apply")
         res = await self._run(page, monkeypatch, dry_run=False)
         assert res.success is False
@@ -242,3 +288,41 @@ class TestSetFirst:
     async def test_empty_value_is_noop(self):
         app = AutoApplicant()
         assert await app._set_first(FakePage({}), ["#a"], "") is False
+
+
+class TestEventLoopIsNotBlocked:
+    """apply_to_job runs on the bot's event loop (via the apply worker), so the
+    blocking Anthropic cover-letter call must go to a thread — otherwise Telegram
+    polling and the scheduler stall for the whole request."""
+
+    async def test_cover_letter_call_does_not_block_the_loop(self, monkeypatch):
+        def slow_generate(title, company, description=""):
+            time.sleep(0.2)  # stand-in for the real, blocking Anthropic request
+            return "Cover letter."
+
+        monkeypatch.setattr(engine_mod, "generate_cover_letter", slow_generate)
+        monkeypatch.setattr(engine_mod, "get_job_by_id", lambda job_id: None)
+        monkeypatch.setattr(engine_mod, "set_cover_letter", lambda job_id, text: None)
+        monkeypatch.setattr(engine_mod, "log_action", lambda *a, **k: None)
+
+        ticks = 0
+
+        async def ticker():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.01)
+                ticks += 1
+
+        task = asyncio.create_task(ticker())
+        try:
+            # Recruitee has no auto-submit path, so this stops after the cover
+            # letter — no browser is launched.
+            result = await AutoApplicant().apply_to_job(
+                {"id": 1, "title": "PM", "company": "Acme",
+                 "url": "https://example.com/job", "platform": "recruitee"}
+            )
+        finally:
+            task.cancel()
+
+        assert result.method == "manual_handoff"
+        assert ticks >= 5, f"event loop was blocked during generation (only {ticks} ticks)"

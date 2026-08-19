@@ -15,7 +15,8 @@ Automated job hunting: scrapes 50 jobs/day from 5 platforms, sends to Telegram f
 - **Python 3.12**, venv at `.venv/`
 - **Playwright 1.58.0** — Chromium headless for scraping + auto-apply
 - **python-telegram-bot 22.7** — Bot with inline keyboard (approve/reject)
-- **Anthropic Claude** (`claude-sonnet-4-20250514`) — Cover letter + form answer generation
+- **Anthropic Claude** — cover letters (`COVER_LETTER_MODEL`), form answers (`CLAUDE_MODEL`),
+  sponsor scoring (`SPONSOR_MODEL`); model ids live in `config/settings.py`
 - **SQLite** — `hunter.db` with WAL mode, `jobs` + `application_log` tables
 - **APScheduler 3.11.2** — Daily hunt + followup scheduled jobs
 - **Tenacity 9.1.4** — Retry logic (RemoteOK scraper)

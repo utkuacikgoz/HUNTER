@@ -160,24 +160,40 @@ def get_company_velocity(days: int = 14) -> dict[str, int]:
     return {row["c"]: row["n"] for row in rows}
 
 
-def should_skip_scraper(platform: str, threshold: int) -> bool:
+def should_skip_scraper(platform: str, threshold: int, retry_after_days: int = 0) -> bool:
     """True iff the last `threshold` runs of this platform all returned 0 jobs.
 
     A threshold of 0 disables the check entirely.
+
+    `retry_after_days` > 0 makes the skip expire: once the last recorded run is
+    that old, the source gets another attempt. A skipped run records nothing, so
+    without this the zero-streak never ages out and a transient upstream outage
+    disables that source permanently. If the retry also comes back empty it
+    records a fresh zero and the source is skipped for another window.
     """
     if threshold <= 0:
         return False
     conn = get_connection()
     try:
         rows = conn.execute(
-            "SELECT jobs_found FROM scraper_health WHERE platform = ? ORDER BY ran_at DESC LIMIT ?",
+            "SELECT jobs_found, ran_at FROM scraper_health WHERE platform = ? "
+            "ORDER BY ran_at DESC LIMIT ?",
             (platform, threshold),
         ).fetchall()
+        if len(rows) < threshold or not all(row["jobs_found"] == 0 for row in rows):
+            return False
+        if retry_after_days > 0:
+            # Compare in SQL so the stored ran_at format is parsed the same way it
+            # was written (datetime('now'), UTC).
+            expired = conn.execute(
+                "SELECT datetime(?) <= datetime('now', ?) AS expired",
+                (rows[0]["ran_at"], f"-{int(retry_after_days)} days"),
+            ).fetchone()
+            if expired and expired["expired"]:
+                return False
+        return True
     finally:
         conn.close()
-    if len(rows) < threshold:
-        return False
-    return all(row["jobs_found"] == 0 for row in rows)
 
 
 def insert_job(
@@ -422,6 +438,24 @@ def get_filter_precision() -> dict[str, dict[str, int]]:
         if decision in bucket:
             bucket[decision] += 1
     return out
+
+
+def has_unconfirmed_submit(job_id) -> bool:
+    """True if a previous apply attempt clicked submit without seeing a confirmation.
+
+    The apply engine uses this to refuse a re-apply: the earlier application may
+    have landed, and a duplicate submission to the same employer is worse than
+    leaving it for the user to check.
+    """
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM application_log WHERE job_id = ? AND action = 'apply_submitted_unconfirmed' LIMIT 1",
+            (job_id,),
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
 
 
 def get_job_by_id(job_id):

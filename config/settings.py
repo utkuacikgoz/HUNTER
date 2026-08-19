@@ -39,17 +39,15 @@ LINKEDIN_SESSION_COOKIE = os.getenv("LINKEDIN_SESSION_COOKIE", "")
 # --- Anthropic Claude ---
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 # Model for form answers (submitted in applications — keep quality up). Override via env.
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
 # Sponsor scoring is a strict yes/no/unclear JSON classifier run on most flagged jobs every
 # hunt — the textbook cheap-model task. Haiku is ~3x cheaper than Sonnet here. Override via env.
 SPONSOR_MODEL = os.getenv("SPONSOR_MODEL", "claude-haiku-4-5")
 # Cover letters represent you to employers and are low-volume (once per apply), so
 # use the strongest model by default. Override via env.
-COVER_LETTER_MODEL = os.getenv("COVER_LETTER_MODEL", "claude-opus-4-8")
+COVER_LETTER_MODEL = os.getenv("COVER_LETTER_MODEL", "claude-opus-5")
 
 # --- Job preferences ---
-TARGET_ROLE = os.getenv("TARGET_ROLE", "Senior Product Manager")
-MIN_SALARY = int(os.getenv("MIN_SALARY", "80000"))
 LOCATIONS = [loc.strip() for loc in os.getenv("LOCATIONS", "EMEA,Remote,US").split(",") if loc.strip()]
 MAX_JOBS_PER_DAY = int(os.getenv("MAX_JOBS_PER_DAY", "80"))
 # How many jobs to classify concurrently. The sponsor-scoring LLM call is a network
@@ -62,6 +60,10 @@ MAX_QUERIES_PER_RUN = int(os.getenv("MAX_QUERIES_PER_RUN", "0"))
 # more breadth); the target-driven loop then dedups/filters down to the day's fresh
 # quota. Raise for more breadth, lower to rate-limit a noisy source.
 SOURCE_FETCH_CAP = int(os.getenv("SOURCE_FETCH_CAP", "150"))
+# How many ATS boards to fetch at once. The catalog sources walk ~60 Greenhouse and
+# ~50 Ashby boards per hunt; fetched one at a time that phase is pure round-trip
+# latency. Kept modest so we stay polite to each ATS. 1 restores serial fetching.
+ATS_FETCH_CONCURRENCY = int(os.getenv("ATS_FETCH_CONCURRENCY", "6"))
 
 
 def _csv_set(env_name: str, default: str) -> set[str]:
@@ -212,6 +214,11 @@ WELLFOUND_SELECTORS = [
 ]
 # Skip a scraper if its last N runs all returned 0 jobs (0 disables the check).
 SCRAPER_SKIP_AFTER_ZEROS = int(os.getenv("SCRAPER_SKIP_AFTER_ZEROS", "3"))
+# How long an auto-skip lasts before the source gets another chance. A skipped run
+# records nothing, so without this the zero-streak never ages out and a transient
+# upstream outage would disable that source permanently (until scraper_health is
+# cleared by hand). 0 restores that old permanent behavior.
+SCRAPER_RETRY_AFTER_DAYS = int(os.getenv("SCRAPER_RETRY_AFTER_DAYS", "3"))
 # Run the browser-based scrapers (RemoteOK, Wellfound — they launch Chromium).
 # Set false to run API-only (no Playwright/Chromium): lighter on RAM, ideal for a
 # co-located profile that never auto-applies. Default true keeps all sources.
@@ -293,6 +300,48 @@ APPLY_DRY_RUN = os.getenv("APPLY_DRY_RUN", "false").strip().lower() in {"1", "tr
 # every approved job (and per-company application limits) at once. 0 = no cap.
 MAX_APPLIES_PER_RUN = int(os.getenv("MAX_APPLIES_PER_RUN", "10"))
 
+# --- Applicant answers ---
+# Canned answers the apply engine fills into forms, and the candidate facts the
+# dropdown chooser reasons from. PII comes from env (fly secrets in prod), never
+# from source. Kept here with the rest of the config — nothing outside this file
+# reads os.getenv.
+COMMON_ANSWERS = {
+    "salary": os.getenv("ANSWER_SALARY", "$80,000 - $120,000 depending on total compensation package"),
+    "availability": os.getenv("ANSWER_AVAILABILITY", "Available to start within 2-4 weeks"),
+    "work_authorization": os.getenv(
+        "ANSWER_WORK_AUTH",
+        "Based in Turkey, authorized to work in EMEA. Open to relocation and can work US timezone hours.",
+    ),
+    "remote": os.getenv(
+        "ANSWER_REMOTE",
+        "Yes, I have extensive experience working remotely with distributed teams "
+        "across Turkey, UAE, KSA, and the US.",
+    ),
+    "years_experience": os.getenv("ANSWER_YOE", "8+"),
+    # Sensitive yes/no questions — answered from the candidate's known situation
+    # (Turkey-based: needs sponsorship). Used to pick dropdown options in the
+    # structured ATS appliers. "yes"/"no" are matched against option text.
+    "requires_sponsorship": os.getenv("ANSWER_REQUIRES_SPONSORSHIP", "yes"),
+    "work_authorized": os.getenv("ANSWER_WORK_AUTHORIZED", "no"),
+    "location": os.getenv("ANSWER_LOCATION", "Istanbul, Turkey"),
+    # Split city/country: ATS location dropdowns ask for them separately, and a
+    # combined string matches no option.
+    "city": os.getenv("ANSWER_CITY", "Istanbul"),
+    "country": os.getenv("ANSWER_COUNTRY", "Turkey"),
+    # Residency/tax questions ("are you a US tax resident?") follow from where the
+    # candidate actually lives.
+    "us_tax_resident": os.getenv("ANSWER_US_TAX_RESIDENT", "no"),
+    "demographic": os.getenv("ANSWER_DEMOGRAPHIC", "Decline to self-identify"),
+    "referral_source": os.getenv("ANSWER_REFERRAL", "LinkedIn"),
+    "linkedin": os.getenv("APPLICANT_LINKEDIN", ""),
+    "website": os.getenv("APPLICANT_WEBSITE", ""),
+    "phone": os.getenv("APPLICANT_PHONE", ""),
+    "email": os.getenv("APPLICANT_EMAIL", ""),
+    "name": os.getenv("APPLICANT_NAME", ""),
+    "first_name": os.getenv("APPLICANT_FIRST_NAME", ""),
+    "last_name": os.getenv("APPLICANT_LAST_NAME", ""),
+}
+
 # --- Resume ---
 RESUME_PATH = BASE_DIR / os.getenv("RESUME_PATH", "config/resume.pdf")
 
@@ -349,7 +398,7 @@ def validate_config(command: str) -> list[str]:
     """Validate required config for a given command. Returns list of errors."""
     errors = []
 
-    if command in ("hunt", "bot", "review"):
+    if command in ("hunt", "bot"):
         if not TELEGRAM_BOT_TOKEN:
             errors.append("TELEGRAM_BOT_TOKEN is required. Talk to @BotFather on Telegram.")
         if not TELEGRAM_CHAT_ID:

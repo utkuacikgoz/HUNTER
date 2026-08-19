@@ -32,6 +32,7 @@ from config.settings import (
     MAX_QUERIES_PER_RUN,
     PRUNE_SCHEDULE_HOUR,
     PRUNE_SCHEDULE_MINUTE,
+    SCRAPER_RETRY_AFTER_DAYS,
     SCRAPER_SKIP_AFTER_ZEROS,
     SEARCH_QUERIES,
     SOURCE_FETCH_CAP,
@@ -121,6 +122,13 @@ def _build_scrapers() -> list:
     return scrapers
 
 
+def _skip_recovery_hint() -> str:
+    """How an auto-skipped source comes back — same wording in the log and the alert."""
+    if SCRAPER_RETRY_AFTER_DAYS > 0:
+        return f"Retrying automatically in {SCRAPER_RETRY_AFTER_DAYS}d."
+    return "Clear scraper_health to re-enable (SCRAPER_RETRY_AFTER_DAYS=0 → no auto-retry)."
+
+
 async def _scrape_all() -> list[dict]:
     """Run every enabled scraper. Skips scrapers stuck on zero-yield streaks."""
     scrapers = _build_scrapers()
@@ -137,10 +145,10 @@ async def _scrape_all() -> list[dict]:
             logger.info(f"Collection ceiling {collect_ceiling} reached; stopping early.")
             break
         platform = scraper.platform_name
-        if should_skip_scraper(platform, SCRAPER_SKIP_AFTER_ZEROS):
+        if should_skip_scraper(platform, SCRAPER_SKIP_AFTER_ZEROS, SCRAPER_RETRY_AFTER_DAYS):
             logger.warning(
                 f"Scraper {platform} skipped: last {SCRAPER_SKIP_AFTER_ZEROS} runs returned 0 jobs "
-                "(check selectors / site changes; clear scraper_health to re-enable)."
+                f"(check selectors / site changes). {_skip_recovery_hint()}"
             )
             continue
 
@@ -168,6 +176,19 @@ async def _scrape_all() -> list[dict]:
         finally:
             record_scraper_run(platform, len(scraper_jobs))
             all_jobs.extend(scraper_jobs)
+
+        # This run just completed the zero-yield streak, so the next hunt will skip
+        # this source. Say so once, here, at the transition — the worker's logs are
+        # ephemeral, and a silently dropped source is otherwise invisible until the
+        # review queue quietly thins out. (Skipped runs record nothing, so this
+        # can't re-fire until the retry window elapses and the retry also fails.)
+        if not scraper_jobs and should_skip_scraper(
+            platform, SCRAPER_SKIP_AFTER_ZEROS, SCRAPER_RETRY_AFTER_DAYS
+        ):
+            await send_telegram_alert(
+                f"🚨 Source '{platform}' returned 0 jobs {SCRAPER_SKIP_AFTER_ZEROS} runs in a row "
+                f"— pausing it. {_skip_recovery_hint()}"
+            )
 
     return all_jobs
 
@@ -221,15 +242,27 @@ async def _classify_and_store(jobs: list[dict]) -> tuple[int, dict[str, int]]:
     return new_count, counts
 
 
+# Mirrors the verdict ordering get_pending_jobs applies in SQL. Kept here so the
+# velocity boost can re-rank inside a verdict group without crossing groups.
+_VERDICT_RANK = {"include": 0, "flag": 1}
+
+
 def _rank_pending_by_velocity(velocity: dict[str, int]) -> list[dict]:
-    """Fetch pending jobs and stable-sort by velocity desc when enabled."""
+    """Fetch pending jobs and re-rank by hiring velocity *within* each verdict group.
+
+    Verdict stays the primary key (include → flag → other), matching the order
+    get_pending_jobs already applied; velocity only reorders jobs that share a
+    verdict, and equal-velocity ties keep the DB's scraped_at DESC order (stable
+    sort). Sorting on velocity alone would float a flagged job from a hot company
+    above every confident include.
+    """
     pending = get_pending_jobs(limit=MAX_JOBS_PER_DAY)
     if VELOCITY_BOOST_RANK and velocity:
-        # Primary verdict order (include→flag) was set by get_pending_jobs;
-        # this stable sort only reshuffles within each group.
         pending.sort(
-            key=lambda j: velocity.get((j.get("company") or "").strip().lower(), 0),
-            reverse=True,
+            key=lambda j: (
+                _VERDICT_RANK.get(j.get("filter_verdict") or "", 2),
+                -velocity.get((j.get("company") or "").strip().lower(), 0),
+            )
         )
     return pending
 
