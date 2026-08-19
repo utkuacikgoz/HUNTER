@@ -266,14 +266,11 @@ def check_sponsor_allowlist(company: str) -> SponsorStatus:
     return "unknown"
 
 
-def evaluate_job(
-    job: dict,
-    *,
-    llm_score: Callable[[str, str], Awaitable[dict]] | None = None,
-) -> JobVerdict:
-    """Synchronous classifier. Pass `llm_score=None` to keep it pure-Python.
+def evaluate_job(job: dict) -> JobVerdict:
+    """Synchronous, pure-Python classifier (no network).
 
-    For LLM-assisted scoring use `evaluate_job_async` instead.
+    For LLM-assisted sponsor scoring use `evaluate_job_async`, which takes an
+    `llm_score` callable.
     """
     return _evaluate_sync(job)
 

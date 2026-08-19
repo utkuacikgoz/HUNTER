@@ -40,6 +40,19 @@ from tracker.database import (
 
 logger = logging.getLogger(__name__)
 
+# One shared Bot for out-of-band sends (alerts, cover letters, screenshots).
+# Constructing `Bot(token=...)` per message left an httpx connection pool behind
+# every time, in a process that runs for months. Cached against the class it was
+# built from so a test that swaps `Bot` still gets its own instance.
+_bot_cache: tuple[type, "Bot"] | None = None
+
+
+def _bot() -> "Bot":
+    global _bot_cache
+    if _bot_cache is None or _bot_cache[0] is not Bot:
+        _bot_cache = (Bot, Bot(token=TELEGRAM_BOT_TOKEN))
+    return _bot_cache[1]
+
 
 # Only the confident "Sponsor-friendly" badge is worth showing. Flagged/unclear jobs get no
 # sponsorship line (don't claim what we're unsure of); dropped jobs are never sent.
@@ -137,7 +150,7 @@ async def send_jobs_batch(jobs: list[dict]) -> None:
         logger.error("Telegram credentials not configured")
         return
 
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    bot = _bot()
 
     if ENABLE_AUTO_APPLY:
         actions = (
@@ -184,7 +197,7 @@ async def send_jobs_batch(jobs: list[dict]) -> None:
 
 async def send_followup_reminders() -> None:
     """Send follow-up reminders for jobs applied 7+ days ago."""
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    bot = _bot()
     jobs = get_jobs_needing_followup()
 
     if not jobs:
@@ -207,7 +220,7 @@ async def send_followup_reminders() -> None:
             text = (
                 f"📧 *Follow\\-up \\#{followup_count + 1}*\n"
                 f"🔹 {_escape_md(job['title'])} at {_escape_md(job['company'])}\n"
-                f"📅 Applied: {_escape_md(job.get('applied_at', 'N/A')[:10])}\n"
+                f"📅 Applied: {_escape_md((job.get('applied_at') or 'N/A')[:10])}\n"
                 f"🔗 [Job Link]({job['url']})"
             )
 
@@ -233,7 +246,7 @@ async def send_followup_reminders() -> None:
 
 async def send_stats_message() -> None:
     """Send current stats to Telegram."""
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    bot = _bot()
     stats = get_stats()
 
     text = (
@@ -267,7 +280,7 @@ async def send_telegram_alert(text: str) -> None:
         logger.warning("Telegram not configured; alert dropped: %s", text)
         return
     try:
-        await Bot(token=TELEGRAM_BOT_TOKEN).send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
+        await _bot().send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
     except Exception as e:
         logger.warning(f"Failed to send alert: {e}")
 
@@ -372,16 +385,16 @@ async def cmd_applied(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No applications yet. Start hunting! 🎯")
         return
 
-    text = f"📨 *Applied Jobs ({len(jobs)})*\n\n"
+    text = f"📨 Applied Jobs ({len(jobs)})\n\n"
     for i, job in enumerate(jobs[:30], 1):
         status_emoji = {"applied": "📨", "interviewing": "🎤", "offered": "🎉"}.get(job["status"], "📨")
         text += (
             f"{i}. {status_emoji} {job['title']} @ {job['company']}\n"
-            f"   📅 {job.get('applied_at', 'N/A')[:10]} | "
+            f"   📅 {(job.get('applied_at') or 'N/A')[:10]} | "
             f"Follow-ups: {job.get('followup_count', 0)}\n\n"
         )
 
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(text)
 
 
 async def cmd_followups(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -440,33 +453,43 @@ async def shutdown_apply_worker(timeout: float = 60.0) -> None:
 def _format_apply_result(result, job: dict) -> str:
     """Build the Telegram status message for a finished apply attempt.
 
+    Plain text, no parse_mode: the job title and company are scraped from the web,
+    and a '_' or '*' in either makes Telegram reject a Markdown message outright —
+    the card then silently never updates.
+
     Honest about reality: only ``success`` means the bot actually submitted and
-    saw a confirmation. Everything else is a MANUAL apply \u2014 the bot fills the
-    form in its own server-side browser, which the user's browser can't see, so
-    we never tell them a link is "pre-filled". The tailored cover letter is sent
-    separately for copy/paste (see _auto_apply).
+    saw a confirmation. Everything else is a MANUAL apply — the bot fills the form
+    in its own server-side browser, which the user's browser can't see, so we never
+    tell them a link is "pre-filled". The tailored cover letter is sent separately
+    for copy/paste (see _auto_apply).
     """
     header = f"{job.get('title', '')} @ {job.get('company', '')}"
     url = job.get("url", "")
 
     if result.method == "already_applied":
-        return f"\u21a9\ufe0f *ALREADY APPLIED*\n{header}\n_{result.message}_"
+        return f"\u21a9\ufe0f ALREADY APPLIED\n{header}\n{result.message}"
 
     if result.success:
-        return f"\u2705 *APPLIED & CONFIRMED*\n{header}\n_{result.message}_"
+        return f"\u2705 APPLIED & CONFIRMED\n{header}\n{result.message}"
 
     # Non-success: the bot could not submit for you (this ATS needs a manual
     # submit, the submit wasn't confirmed, or APPLY_DRY_RUN is on). The link opens
-    # a BLANK form \u2014 the server-side fill doesn't transfer to your browser.
+    # a BLANK form — the server-side fill doesn't transfer to your browser.
     why = {
-        "form_filled": "I prepared this one but can't submit it for you here \u2014 apply manually (the link is a blank form).",
+        "form_filled": result.message,
         "manual_handoff": "This ATS needs a manual submit \u2014 apply via the link (cover letter below).",
         "screenshot_only": "No apply form I can drive \u2014 apply manually.",
         "external_redirect": "Application is on an external site \u2014 apply manually.",
     }.get(result.method)
+    if result.method == "submitted_unconfirmed":
+        # Neither applied nor safe to retry: say exactly that.
+        return (
+            f"\u2753 SUBMITTED, UNCONFIRMED\n{header}\n{result.message}\n{url}\n"
+            "I won't retry this one automatically."
+        )
     if why is None:
-        return f"\u274c *APPLY FAILED*\n{header}\n_{result.message}_"
-    return f"\U0001f4dd *APPLY MANUALLY*\n{header}\n_{why}_\n{url}"
+        return f"\u274c APPLY FAILED\n{header}\n{result.message}"
+    return f"\U0001f4dd APPLY MANUALLY\n{header}\n{why}\n{url}"
 
 
 async def _auto_apply(query, job_id: int, job: dict):
@@ -479,12 +502,12 @@ async def _auto_apply(query, job_id: int, job: dict):
         text = _format_apply_result(result, job)
     except Exception as e:
         logger.error(f"Auto-apply failed for job {job_id}: {e}")
-        text = f"\u274c *APPLY FAILED*\n{job['title']} @ {job['company']}\n{str(e)[:100]}"
+        text = f"\u274c APPLY FAILED\n{job['title']} @ {job['company']}\n{str(e)[:100]}"
     finally:
         _active_apply_tasks.discard(task)
 
     try:
-        await query.edit_message_text(text=text, parse_mode="Markdown")
+        await query.edit_message_text(text=text)
     except Exception:
         logger.debug(f"Could not update message for job {job_id}")
 
@@ -495,7 +518,7 @@ async def _auto_apply(query, job_id: int, job: dict):
             fresh = get_job_by_id(job_id)
             cover_letter = (fresh or {}).get("cover_letter") or ""
             if cover_letter:
-                bot = Bot(token=TELEGRAM_BOT_TOKEN)
+                bot = _bot()
                 await bot.send_message(
                     chat_id=TELEGRAM_CHAT_ID,
                     text=f"📄 Cover letter for {job['title']} @ {job['company']} (copy/paste):\n\n{cover_letter}",
@@ -506,7 +529,7 @@ async def _auto_apply(query, job_id: int, job: dict):
     # Send screenshot as proof
     if result and result.screenshot_path and os.path.exists(result.screenshot_path):
         try:
-            bot = Bot(token=TELEGRAM_BOT_TOKEN)
+            bot = _bot()
             with open(result.screenshot_path, "rb") as f:
                 await bot.send_photo(
                     chat_id=TELEGRAM_CHAT_ID,
@@ -517,9 +540,33 @@ async def _auto_apply(query, job_id: int, job: dict):
             logger.debug(f"Could not send screenshot for job {job_id}: {e}")
 
 
+async def _refuse_auto_apply(query, job: dict) -> None:
+    """Turn an Approve / Apply Now tap into a manual-apply card.
+
+    Telegram cards live forever, so a card sent while ENABLE_AUTO_APPLY was on
+    still carries those buttons after the profile is switched to sourcing-only.
+    Submitting an application the profile has disabled is not recoverable, so
+    these taps are refused rather than honored — same defense the Cover Letter
+    handler already has for the opposite direction.
+    """
+    await query.edit_message_text(
+        text=(
+            f"🚫 Auto-apply is off for this profile.\n"
+            f"{job['title']} @ {job['company']}\n"
+            f"🔗 {job['url']}\n\n"
+            f"Apply yourself via the link above."
+        ),
+        reply_markup=_review_keyboard(job),
+        disable_web_page_preview=True,
+    )
+
+
 async def _handle_approve(query, job: dict) -> None:
     """Mark approved and surface the URL. Does NOT auto-apply — the user reviews
     the destination URL first, then explicitly taps Apply Now (or sends /apply)."""
+    if not ENABLE_AUTO_APPLY:
+        await _refuse_auto_apply(query, job)
+        return
     job_id = job["id"]
     approve_job(job_id)
     _record_filter_outcome(job, "approve")
@@ -542,6 +589,9 @@ async def _handle_approve(query, job: dict) -> None:
 
 async def _handle_applynow(query, job: dict) -> None:
     """Enqueue an approved job for the serial apply worker."""
+    if not ENABLE_AUTO_APPLY:
+        await _refuse_auto_apply(query, job)
+        return
     job_id = job["id"]
     _ensure_apply_worker()
     await _apply_queue.put((query, job_id, job))
@@ -603,7 +653,7 @@ async def _handle_coverletter(query, job: dict) -> None:
     )
     # Send the letter as a separate PLAIN-TEXT message (no Markdown) for clean copy/paste.
     try:
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        bot = _bot()
         await bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
             text=f"📄 Cover letter for {job['title']} @ {job['company']} (copy/paste):\n\n{cover_letter}",
@@ -616,32 +666,28 @@ async def _handle_reject(query, job: dict) -> None:
     reject_job(job["id"])
     _record_filter_outcome(job, "reject")
     await query.edit_message_text(
-        text=f"❌ *SKIPPED*\n{job['title']} @ {job['company']}",
-        parse_mode="Markdown",
+        text=f"❌ SKIPPED\n{job['title']} @ {job['company']}",
     )
 
 
 async def _handle_followedup(query, job: dict) -> None:
     record_followup(job["id"])
     await query.edit_message_text(
-        text=f"📧 *FOLLOWED UP*\n{job['title']} @ {job['company']}",
-        parse_mode="Markdown",
+        text=f"📧 FOLLOWED UP\n{job['title']} @ {job['company']}",
     )
 
 
 async def _handle_interviewing(query, job: dict) -> None:
     update_job_status(job["id"], "interviewing")
     await query.edit_message_text(
-        text=f"🎤 *INTERVIEWING*\n{job['title']} @ {job['company']}",
-        parse_mode="Markdown",
+        text=f"🎤 INTERVIEWING\n{job['title']} @ {job['company']}",
     )
 
 
 async def _handle_close(query, job: dict) -> None:
     update_job_status(job["id"], "closed")
     await query.edit_message_text(
-        text=f"🚪 *CLOSED*\n{job['title']} @ {job['company']}",
-        parse_mode="Markdown",
+        text=f"🚪 CLOSED\n{job['title']} @ {job['company']}",
     )
 
 
@@ -694,10 +740,27 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await handler(query, job)
 
 
+async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log anything a handler raised, and tell the user their tap didn't land.
+
+    Without a registered error handler python-telegram-bot swallows handler
+    exceptions into its own logger, so a failed Approve/Skip looked to the user
+    like a card that simply stopped responding.
+    """
+    logger.error(f"Handler error: {context.error}", exc_info=context.error)
+    query = getattr(update, "callback_query", None)
+    if query is not None:
+        try:
+            await query.answer(text="Something went wrong — check the logs.", show_alert=True)
+        except Exception as e:
+            logger.debug(f"could not surface handler error: {e}")
+
+
 def build_bot_app() -> Application:
     """Build and return the Telegram bot Application."""
     defaults = Defaults(tzinfo=pytz.timezone("Europe/Istanbul"))
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).defaults(defaults).build()
+    app.add_error_handler(_on_error)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("report", cmd_report))

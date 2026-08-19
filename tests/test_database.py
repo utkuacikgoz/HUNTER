@@ -392,6 +392,41 @@ class TestScraperHealth:
             record_scraper_run("wellfound", 0)
         assert should_skip_scraper("wellfound", threshold=0) is False
 
+    def _age_runs(self, platform: str, days: int) -> None:
+        """Backdate this platform's recorded runs by `days`."""
+        conn = get_connection()
+        try:
+            conn.execute(
+                "UPDATE scraper_health SET ran_at = datetime('now', ?) WHERE platform = ?",
+                (f"-{days} days", platform),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_skip_expires_after_retry_window(self):
+        # A skipped run records nothing, so without an expiry the zero-streak would
+        # never age out and a transient outage would kill the source permanently.
+        for _ in range(3):
+            record_scraper_run("wellfound", 0)
+        assert should_skip_scraper("wellfound", threshold=3, retry_after_days=3) is True
+        self._age_runs("wellfound", 4)
+        assert should_skip_scraper("wellfound", threshold=3, retry_after_days=3) is False
+
+    def test_retry_window_zero_keeps_skip_permanent(self):
+        for _ in range(3):
+            record_scraper_run("wellfound", 0)
+        self._age_runs("wellfound", 365)
+        assert should_skip_scraper("wellfound", threshold=3, retry_after_days=0) is True
+
+    def test_failed_retry_starts_a_new_window(self):
+        for _ in range(3):
+            record_scraper_run("wellfound", 0)
+        self._age_runs("wellfound", 4)
+        assert should_skip_scraper("wellfound", threshold=3, retry_after_days=3) is False
+        record_scraper_run("wellfound", 0)  # the retry also came back empty
+        assert should_skip_scraper("wellfound", threshold=3, retry_after_days=3) is True
+
 
 class TestDuplicateApplyGuard:
     """Verify the pattern used by applicant/engine.py to prevent double-apply."""

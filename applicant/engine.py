@@ -9,12 +9,23 @@ from playwright.async_api import Page, async_playwright
 from config.settings import (
     APPLY_DRY_RUN,
     CHROMIUM_LAUNCH_ARGS,
+    COMMON_ANSWERS,
     LINKEDIN_SESSION_COOKIE,
     MAX_APPLIES_PER_RUN,
     RESUME_PATH,
 )
-from prompts.generator import COMMON_ANSWERS, generate_cover_letter, generate_form_answer
-from tracker.database import get_job_by_id, log_action, mark_applied, set_cover_letter
+from prompts.generator import (
+    choose_dropdown_option,
+    generate_cover_letter,
+    generate_form_answer,
+)
+from tracker.database import (
+    get_job_by_id,
+    has_unconfirmed_submit,
+    log_action,
+    mark_applied,
+    set_cover_letter,
+)
 
 # Cache LLM answers per question text within a process so we don't pay for the
 # same free-text question twice across a batch of applications.
@@ -39,6 +50,27 @@ PAGE_TIMEOUT_MS = 20000          # page.goto navigation timeout
 PAGE_SETTLE_S = 2                # pause after navigation / clicks for JS to render
 STEP_PAUSE_S = 1.5               # pause between LinkedIn Easy Apply steps
 MAX_FORM_STEPS = 10              # max LinkedIn multi-step form pages to traverse
+MENU_SETTLE_S = 0.4              # pause for a dropdown menu to render its options
+CONFIRM_TIMEOUT_S = 15           # how long to wait for a submit to be confirmed
+CLICK_TIMEOUT_MS = 5000          # per-click actionability wait (Playwright's default is 30s)
+
+# Resolve the question text for a form control: <label for=id>, then an enclosing
+# label, then aria-label / name. Shared by every field-filling pass so they all read
+# the same question for the same element.
+_LABEL_JS = r"""el => {
+    let t = '';
+    const id = el.getAttribute('id');
+    if (id) {
+        const l = document.querySelector('label[for="' + (window.CSS?.escape ? CSS.escape(id) : id) + '"]');
+        if (l) t = l.textContent;
+    }
+    if (!t) {
+        const by = el.getAttribute('aria-labelledby');
+        if (by) { const l = document.getElementById(by); if (l) t = l.textContent; }
+    }
+    if (!t) { const l = el.closest('div')?.querySelector('label, legend'); if (l) t = l.textContent; }
+    return (t || el.getAttribute('aria-label') || el.getAttribute('name') || '').replace(/\s+/g, ' ').trim();
+}"""
 
 
 class AutoApplicant:
@@ -82,13 +114,29 @@ class AutoApplicant:
                 success=True, method="already_applied",
                 message="Already applied; skipped.",
             )
+        # A previous run clicked submit but couldn't confirm it. The application may
+        # well have landed, so re-running would double-apply to the same employer —
+        # which is worse than doing nothing. Hand it back for a human to check.
+        if has_unconfirmed_submit(job_id):
+            logger.info(f"Job {job_id} has an unconfirmed submit; not re-applying")
+            return ApplyResult(
+                success=False, method="manual_handoff",
+                message=(
+                    "A previous run already clicked submit but couldn't confirm it. "
+                    "Check your email before applying again."
+                ),
+            )
 
         logger.info(f"Applying to: {job['title']} at {job['company']} ({platform})")
 
         try:
-            # Generate cover letter
-            cover_letter = generate_cover_letter(
-                job["title"], job["company"], job.get("description", "")
+            # Generate cover letter. generate_cover_letter is a blocking Anthropic
+            # call and this coroutine runs on the bot's event loop (via the apply
+            # worker), so it goes to a thread — otherwise Telegram polling and the
+            # scheduler stall for the whole request.
+            cover_letter = await asyncio.to_thread(
+                generate_cover_letter,
+                job["title"], job["company"], job.get("description", ""),
             )
             set_cover_letter(job_id, cover_letter)
 
@@ -115,6 +163,10 @@ class AutoApplicant:
                 mark_applied(job_id)
                 log_action(job_id, "applied", f"method={result.method}: {result.message}")
                 logger.info(f"✅ Applied ({result.method}): {job['title']} at {job['company']}")
+            elif result.method == "submitted_unconfirmed":
+                # Recorded under its own action so the guard above can find it.
+                log_action(job_id, "apply_submitted_unconfirmed", result.message)
+                logger.warning(f"⚠️ Unconfirmed submit: {job['title']} at {job['company']}")
             else:
                 log_action(job_id, "apply_failed", f"method={result.method}: {result.message}")
                 logger.warning(f"⚠️ Apply incomplete ({result.method}): {job['title']} at {job['company']}")
@@ -407,15 +459,7 @@ class AutoApplicant:
             try:
                 if await el.input_value():
                     continue
-                label = await el.evaluate(
-                    """el => {
-                        let t = '';
-                        const id = el.getAttribute('id');
-                        if (id) { const l = document.querySelector('label[for="'+id+'"]'); if (l) t = l.textContent; }
-                        if (!t) { const l = el.closest('div')?.querySelector('label'); if (l) t = l.textContent; }
-                        return (t || el.getAttribute('aria-label') || el.getAttribute('name') || '').trim();
-                    }"""
-                )
+                label = await el.evaluate(_LABEL_JS)
                 tag = await el.evaluate("el => el.tagName.toLowerCase()")
                 value = await self._resolve_field_value(
                     label, cover_letter, is_freetext=(tag == "textarea"), job=job
@@ -427,11 +471,23 @@ class AutoApplicant:
                 logger.debug(f"labeled question skipped: {e}")
 
     def _select_target(self, label: str) -> str | None:
-        """Map a dropdown's question to the option keyword to pick, from the
-        candidate's known answers. Returns None to leave the select untouched."""
+        """Map a dropdown's question to the option text to pick, from the candidate's
+        known answers. Returns None when no rule applies — the caller then asks the
+        model to choose from the actual option list.
+
+        "decline" and the yes/no answers are matched against option text by
+        `_match_option`; anything else is a literal value to type or substring-match
+        (a city, a country, a referral source).
+        """
         h = (label or "").lower()
         if not h:
             return None
+        # Demographic questions are answered by rule and never sent to the model:
+        # we always decline, so there is nothing to reason about.
+        if any(w in h for w in ("gender", "race", "ethnic", "veteran", "disability",
+                                "hispanic", "latino", "identify", "orientation",
+                                "neurodiver", "pronoun")):
+            return "decline"
         # Check authorization BEFORE sponsorship: "authorized to work WITHOUT
         # sponsorship?" mentions sponsorship but is really an authorization question
         # (answer = work_authorized = No), distinct from "do you REQUIRE sponsorship?"
@@ -439,13 +495,56 @@ class AutoApplicant:
             return "yes" if COMMON_ANSWERS["work_authorized"].lower().startswith("y") else "no"
         if "sponsor" in h:  # "Will you require visa sponsorship?"
             return "yes" if COMMON_ANSWERS["requires_sponsorship"].lower().startswith("y") else "no"
-        if any(w in h for w in ("gender", "race", "ethnic", "veteran", "disability",
-                                "hispanic", "latino", "identify")):
-            return "decline"
+        # Residency/tax questions follow from where the candidate actually lives.
+        if "tax resident" in h or "resident of" in h:
+            return "yes" if COMMON_ANSWERS["us_tax_resident"].lower().startswith("y") else "no"
+        # Mandatory consent/acknowledgement questions ("do you consent to us storing
+        # your application?"). The user approved this specific job for auto-apply, and
+        # the ATS won't accept the application without it, so the affirmative option
+        # is chosen — see _match_option, which refuses any negated variant.
+        if "consent" in h or "privacy" in h or "agree to" in h or "acknowledge" in h:
+            return "consent"
         if "hear about" in h or "how did you" in h or "referr" in h or "source" in h:
             return COMMON_ANSWERS["referral_source"].lower()
+        # Location dropdowns are split into country and city on most ATS forms, and a
+        # combined "Istanbul, Turkey" matches neither list.
+        if "country" in h:
+            return COMMON_ANSWERS["country"].lower()
+        if "city" in h or "location" in h:
+            return COMMON_ANSWERS["city"].lower()
         if any(w in h for w in ("remote", "work from home", "wfh")) or "relocat" in h:
             return "yes"
+        return None
+
+    @staticmethod
+    def _match_option(target: str, options: list[str]) -> int | None:
+        """Index of the option that satisfies `target`, or None."""
+        lowered = [(o or "").strip().lower() for o in options]
+        if target == "decline":
+            for i, txt in enumerate(lowered):
+                if any(p in txt for p in ("decline", "prefer not", "wish not", "do not wish",
+                                          "not to answer", "not to say", "rather not",
+                                          "do not want to answer", "don't want to answer",
+                                          "not disclose", "choose not")):
+                    return i
+            return None
+        if target == "consent":
+            negated = ("not ", "n't", "withdraw", "decline", "refuse", "object")
+            for i, txt in enumerate(lowered):
+                if any(n in txt for n in negated):
+                    continue
+                if txt.startswith(("i consent", "consent", "i agree", "agree", "yes")) or \
+                        "i consent" in txt or "i agree" in txt:
+                    return i
+            return None
+        if target in ("yes", "no"):
+            for i, txt in enumerate(lowered):
+                if txt == target or txt.startswith(target):
+                    return i
+            return None
+        for i, txt in enumerate(lowered):
+            if target in txt:
+                return i
         return None
 
     async def _fill_selects(self, page: Page) -> None:
@@ -453,14 +552,7 @@ class AutoApplicant:
         from the candidate's known answers. Custom div-comboboxes are skipped."""
         for sel in await page.query_selector_all("select"):
             try:
-                label = await sel.evaluate(
-                    """el => {
-                        let t = ''; const id = el.getAttribute('id');
-                        if (id) { const l = document.querySelector('label[for="'+id+'"]'); if (l) t = l.textContent; }
-                        if (!t) { const l = el.closest('div')?.querySelector('label'); if (l) t = l.textContent; }
-                        return (t || el.getAttribute('aria-label') || el.getAttribute('name') || '').trim();
-                    }"""
-                )
+                label = await sel.evaluate(_LABEL_JS)
                 target = self._select_target(label)
                 if not target:
                     continue
@@ -487,6 +579,214 @@ class AutoApplicant:
                     await asyncio.sleep(0.2)
             except Exception as e:
                 logger.debug(f"select fill skipped: {e}")
+
+    async def _safe_click(self, el) -> bool:
+        """Scroll into view, then click with a short timeout.
+
+        Playwright's default 30s actionability wait turns one covered element into a
+        30-second stall; an open dropdown overlapping the next field did exactly that
+        three times per Greenhouse form, so a single application took minutes and
+        left the covered questions unanswered.
+        """
+        try:
+            await el.scroll_into_view_if_needed(timeout=CLICK_TIMEOUT_MS)
+        except Exception as e:
+            logger.debug(f"scroll_into_view failed: {e}")
+        try:
+            await el.click(timeout=CLICK_TIMEOUT_MS)
+            return True
+        except Exception as e:
+            logger.debug(f"click failed: {e}")
+            return False
+
+    async def _fill_comboboxes(self, page: Page, job: dict | None = None) -> None:
+        """Answer react-select style comboboxes.
+
+        Greenhouse's current application form renders every dropdown — country, city,
+        work authorization, EEO — as `input[role=combobox]` backed by a hidden mirror
+        input, with no native <select> anywhere on the page. `_fill_selects` never
+        sees them, so before this existed they stayed blank and the required ones
+        failed the form's own validation: the submit bounced and every Greenhouse
+        application degraded to a manual apply.
+
+        Rules first (`_select_target`), then the model picks from the actual option
+        list. Demographic questions never reach the model — they resolve to "decline"
+        by rule, and are skipped entirely if no decline-style option exists.
+        """
+        for box in await page.query_selector_all("input[role='combobox']"):
+            try:
+                # Only comboboxes that belong to the application form: job boards put
+                # their own search box on the same page, and answering that one both
+                # costs a model call and types into the wrong field.
+                in_form = await box.evaluate("el => !!el.closest('form')")
+                if not in_form:
+                    continue
+                answered = await box.evaluate(
+                    "el => !!el.closest('.select, [class*=select]')"
+                    "?.querySelector('.select__single-value, [class*=singleValue]')"
+                )
+                if answered:
+                    continue
+                label = await box.evaluate(_LABEL_JS)
+                if not label:
+                    continue
+                # Close anything still open so it can't cover the next field.
+                await page.keyboard.press("Escape")
+                await self._pick_combobox_option(page, box, label)
+                await asyncio.sleep(0.2)
+            except Exception as e:
+                logger.debug(f"combobox skipped: {e}")
+
+    async def _pick_combobox_option(self, page: Page, box, label: str) -> bool:
+        """Open one combobox, choose an option, and click it. True if answered."""
+        target = self._select_target(label)
+        if not await self._safe_click(box):
+            return False
+        await asyncio.sleep(MENU_SETTLE_S)
+
+        # Long filterable lists (country, city) only render matching options once
+        # you type, so type the literal answer first.
+        if target and target not in ("yes", "no", "decline", "consent"):
+            try:
+                await box.type(target, delay=15)
+            except Exception as e:
+                logger.debug(f"combobox type failed: {e}")
+            await asyncio.sleep(MENU_SETTLE_S)
+
+        options = await page.query_selector_all("[role='option']")
+        texts = [((await o.inner_text()) or "").strip() for o in options]
+        if not texts:
+            await page.keyboard.press("Escape")
+            return False
+
+        index = self._match_option(target, texts) if target else None
+        if index is None:
+            if target == "decline":
+                # No decline-style option: leave the demographic question blank
+                # rather than answering it, and never send it to the model.
+                await page.keyboard.press("Escape")
+                return False
+            index = await asyncio.to_thread(choose_dropdown_option, label, texts)
+
+        if index is None or index >= len(options):
+            await page.keyboard.press("Escape")
+            logger.info(f"No answer for dropdown {label[:60]!r} — left blank")
+            return False
+        picked = await self._safe_click(options[index])
+        await page.keyboard.press("Escape")
+        if picked:
+            logger.debug(f"dropdown {label[:40]!r} -> {texts[index][:40]!r}")
+        return picked
+
+    async def _check_required_boxes(self, page: Page) -> list[str]:
+        """Tick required, unticked checkboxes and return their labels.
+
+        These are the ATS's mandatory acknowledgements (data-processing consent,
+        "I confirm the above is accurate"); an application cannot be submitted with
+        one unticked, so leaving them alone means never completing a Greenhouse
+        application. Strictly limited to REQUIRED boxes — optional ones (marketing
+        opt-ins, talent-pool sign-ups) are never touched — and every box ticked is
+        returned so it lands in the application log.
+        """
+        ticked: list[str] = []
+        for box in await page.query_selector_all(
+            "input[type='checkbox'][required], input[type='checkbox'][aria-required='true']"
+        ):
+            try:
+                if await box.is_checked():
+                    continue
+                label = await box.evaluate(_LABEL_JS)
+                if await self._safe_click(box) and await box.is_checked():
+                    ticked.append(label or "(unlabeled required checkbox)")
+            except Exception as e:
+                logger.debug(f"required checkbox skipped: {e}")
+        if ticked:
+            logger.info(f"Accepted {len(ticked)} required consent box(es): {ticked}")
+        return ticked
+
+    async def _missing_required_fields(self, page: Page) -> list[str]:
+        """Labels of required fields that are still empty.
+
+        Used as a pre-submit gate: submitting an incomplete form either bounces off
+        the ATS's validation (and reads as "submitted but unconfirmed" downstream) or,
+        worse, lands a half-filled application under the candidate's name. Either way
+        it's better to hand the job back for a manual apply and say which questions
+        were unanswered.
+
+        `input[role=combobox]` is excluded on purpose: react-select clears that input
+        after a choice, so it always looks empty — its hidden mirror input carries the
+        real value and is checked instead.
+        """
+        return await page.evaluate(
+            r"""() => {
+            const out = [];
+            const els = document.querySelectorAll(
+                'input[required], select[required], textarea[required], [aria-required="true"]'
+            );
+            els.forEach(el => {
+                if (el.getAttribute('role') === 'combobox') return;
+                const type = (el.getAttribute('type') || '').toLowerCase();
+                if (type === 'hidden') return;
+                if (type === 'checkbox' || type === 'radio') {
+                    const name = el.getAttribute('name');
+                    if (!name) return;
+                    const esc = window.CSS?.escape ? CSS.escape(name) : name;
+                    if (document.querySelector('input[name="' + esc + '"]:checked')) return;
+                } else if ((el.value || '').trim()) {
+                    return;
+                }
+                let label = '';
+                const id = el.getAttribute('id');
+                if (id) {
+                    const esc = window.CSS?.escape ? CSS.escape(id) : id;
+                    const l = document.querySelector('label[for="' + esc + '"]');
+                    if (l) label = l.textContent;
+                }
+                if (!label) {
+                    // Walk up until a label turns up: react-select's hidden mirror
+                    // input (the element that actually carries `required`) sits
+                    // several divs below the question's label.
+                    let node = el.parentElement;
+                    for (let i = 0; i < 6 && node && !label; i++) {
+                        const l = node.querySelector('label, legend');
+                        if (l) label = l.textContent;
+                        node = node.parentElement;
+                    }
+                }
+                label = (label || el.getAttribute('aria-label') || el.getAttribute('name') || '')
+                    .replace(/\s+/g, ' ').replace(/\*$/, '').trim();
+                if (label) out.push(label);
+            });
+            return [...new Set(out)];
+        }"""
+        )
+
+    async def _await_confirmation(
+        self, page: Page, before_url: str, confirm_selectors: list[str],
+        confirm_url_substrings: list[str],
+    ) -> bool:
+        """Poll for real evidence the application landed.
+
+        Deliberately not a bare text match on the whole page: `*:has-text('Thank you')`
+        matches <html> whenever those words appear anywhere — including in the footer
+        of the form we just failed to submit — which would report a confirmed apply
+        for an application that was never sent. Evidence is a navigation to a
+        confirmation URL, or a confirmation element on a page that no longer shows
+        the form.
+        """
+        deadline = asyncio.get_running_loop().time() + CONFIRM_TIMEOUT_S
+        while asyncio.get_running_loop().time() < deadline:
+            url = (page.url or "").lower()
+            if url != before_url.lower() and any(sub in url for sub in confirm_url_substrings):
+                return True
+            for sel in confirm_selectors:
+                try:
+                    if await page.query_selector(sel):
+                        return True
+                except Exception as e:
+                    logger.debug(f"confirm selector {sel} failed: {e}")
+            await asyncio.sleep(0.5)
+        return False
 
     async def _fill_radios(self, page: Page) -> None:
         """Answer Yes/No radio-group questions (Ashby uses radios, not selects, for
@@ -543,12 +843,31 @@ class AutoApplicant:
         surfaced for manual review instead of being falsely marked applied.
         """
         ss_path = str(SCREENSHOTS_DIR / f"{platform}_{job['id']}.png")
+        missing = await self._missing_required_fields(page)
+
         if APPLY_DRY_RUN:
             await page.screenshot(path=ss_path)
+            gaps = f" Unanswered required: {', '.join(missing[:6])}." if missing else " All required fields answered."
             return ApplyResult(
                 success=False, method="form_filled", screenshot_path=ss_path,
-                message="DRY RUN: form filled, submit skipped (APPLY_DRY_RUN).",
+                message=f"DRY RUN: form filled, submit skipped (APPLY_DRY_RUN).{gaps}",
             )
+
+        # Don't submit a form the ATS will reject anyway — and never send a
+        # half-filled application under the candidate's name. Say which questions
+        # were unanswered so the manual apply takes seconds.
+        if missing:
+            await page.screenshot(path=ss_path)
+            logger.warning(f"{platform}: not submitting, unanswered required fields: {missing}")
+            return ApplyResult(
+                success=False, method="form_filled", screenshot_path=ss_path,
+                message=(
+                    "Didn't submit — these required questions were left unanswered: "
+                    f"{', '.join(missing[:6])}. Apply manually via the link."
+                ),
+            )
+
+        before_url = page.url or ""
         submitted = False
         for sel in submit_selectors:
             btn = await page.query_selector(sel)
@@ -565,23 +884,25 @@ class AutoApplicant:
                 success=False, method="form_filled", screenshot_path=ss_path,
                 message="Filled form but found no submit button — needs manual apply.",
             )
-        await asyncio.sleep(PAGE_SETTLE_S)
-        url = (page.url or "").lower()
-        confirmed = any(s in url for s in confirm_url_substrings)
-        if not confirmed:
-            for sel in confirm_selectors:
-                if await page.query_selector(sel):
-                    confirmed = True
-                    break
+
+        confirmed = await self._await_confirmation(
+            page, before_url, confirm_selectors, confirm_url_substrings
+        )
         await page.screenshot(path=ss_path)
         if confirmed:
             return ApplyResult(
                 success=True, method="submitted", screenshot_path=ss_path,
                 message="Application submitted and confirmed.",
             )
+        # Submit was clicked but nothing confirmed it. The application may or may not
+        # have landed, so this is reported as its own method: the caller records it and
+        # refuses to auto-resubmit later, which would double-apply to the same employer.
         return ApplyResult(
-            success=False, method="form_filled", screenshot_path=ss_path,
-            message="Submitted but no confirmation detected — verify manually.",
+            success=False, method="submitted_unconfirmed", screenshot_path=ss_path,
+            message=(
+                f"Clicked submit but saw no confirmation within {CONFIRM_TIMEOUT_S}s. "
+                "Check your email before re-applying."
+            ),
         )
 
     async def _apply_greenhouse(self, job: dict, cover_letter: str) -> ApplyResult:
@@ -622,13 +943,23 @@ class AutoApplicant:
             )
             await self._fill_labeled_questions(page, cover_letter, job)
             await self._fill_selects(page)
+            # The current Greenhouse form (job-boards.greenhouse.io) has no native
+            # <select> at all — country, city, work authorization and EEO are all
+            # react-select comboboxes.
+            await self._fill_comboboxes(page, job)
+            await self._fill_radios(page)
+            await self._check_required_boxes(page)
             return await self._submit_and_confirm(
                 page, job, "greenhouse",
-                submit_selectors=["#submit_app", "button[type='submit']", "button:has-text('Submit')"],
+                submit_selectors=[
+                    "button[type='submit']", "button:has-text('Submit application')",
+                    "#submit_app", "button:has-text('Submit')",
+                ],
                 confirm_selectors=[
                     "#application_confirmation",
-                    "*:has-text('Thank you for applying')",
-                    "*:has-text('application has been submitted')",
+                    "[class*='confirmation']",
+                    "h1:has-text('Thank you')",
+                    "h2:has-text('Thank you')",
                 ],
                 confirm_url_substrings=["confirmation", "thank"],
             )
@@ -660,13 +991,17 @@ class AutoApplicant:
             await self._set_first(page, ["textarea[name='comments']"], cover_letter)
             await self._fill_labeled_questions(page, cover_letter, job)
             await self._fill_selects(page)
+            await self._fill_comboboxes(page, job)
+            await self._fill_radios(page)
+            await self._check_required_boxes(page)
             return await self._submit_and_confirm(
                 page, job, "lever",
                 submit_selectors=["button[type='submit']", "button:has-text('Submit application')", "#btn-submit"],
                 confirm_selectors=[
-                    "*:has-text('Thank you')",
-                    "*:has-text('application has been submitted')",
-                    "*:has-text('received your application')",
+                    "[class*='confirmation']",
+                    "h1:has-text('Thank you')",
+                    "h2:has-text('Thank you')",
+                    "h1:has-text('Application received')",
                 ],
                 confirm_url_substrings=["thanks", "thank", "confirmation"],
             )
@@ -704,7 +1039,9 @@ class AutoApplicant:
             await self._upload_resume(page, ["#_systemfield_resume", "input[type='file']"])
             await self._fill_labeled_questions(page, cover_letter, job)
             await self._fill_selects(page)
+            await self._fill_comboboxes(page, job)
             await self._fill_radios(page)
+            await self._check_required_boxes(page)
             return await self._submit_and_confirm(
                 page, job, "ashby",
                 submit_selectors=[
@@ -712,9 +1049,11 @@ class AutoApplicant:
                     "button:has-text('Submit')",
                 ],
                 confirm_selectors=[
-                    "*:has-text('has been submitted')",
-                    "*:has-text('Application received')",
-                    "*:has-text('Thank you')",
+                    "[class*='confirmation']",
+                    "h1:has-text('has been submitted')",
+                    "h2:has-text('has been submitted')",
+                    "h1:has-text('Thank you')",
+                    "h2:has-text('Thank you')",
                 ],
                 confirm_url_substrings=["thank", "submitted", "confirmation", "success"],
             )
@@ -771,55 +1110,6 @@ class AutoApplicant:
 
         except Exception as e:
             logger.error(f"Wellfound apply error: {e}")
-            return ApplyResult(success=False, method="error", message=str(e)[:200])
-        finally:
-            try:
-                await page.close()
-            except Exception as e:
-                logger.debug(f"page.close failed: {e}")
-            try:
-                await context.close()
-            except Exception as e:
-                logger.debug(f"context.close failed: {e}")
-
-    async def _apply_generic(self, job: dict, cover_letter: str) -> ApplyResult:
-        """Generic apply: open page, fill forms, screenshot."""
-        context = await self._new_context()
-        page = await context.new_page()
-
-        try:
-            await page.goto(job["url"], wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
-            await asyncio.sleep(PAGE_SETTLE_S)
-
-            # Try clicking any "Apply" button
-            apply_btn = await page.query_selector(
-                "button:has-text('Apply'), "
-                "a:has-text('Apply'), "
-                "button[class*='apply'], "
-                "a[class*='apply']"
-            )
-
-            method = "screenshot_only"
-            message = "Job page opened. Needs manual application."
-
-            if apply_btn:
-                await apply_btn.click()
-                await asyncio.sleep(PAGE_SETTLE_S)
-                await self._fill_generic_form(page, job, cover_letter)
-                method = "form_filled"
-                message = "Apply button clicked and form filled (unconfirmed)."
-
-            ss_path = str(SCREENSHOTS_DIR / f"generic_{job['id']}.png")
-            await page.screenshot(path=ss_path)
-
-            # Generic applies are never confirmed — mark as needing manual review
-            return ApplyResult(
-                success=False, method=method, screenshot_path=ss_path,
-                message=message,
-            )
-
-        except Exception as e:
-            logger.error(f"Generic apply error: {e}")
             return ApplyResult(success=False, method="error", message=str(e)[:200])
         finally:
             try:
@@ -889,7 +1179,8 @@ async def apply_to_approved_jobs(jobs: list[dict], headless=True) -> dict:
             result = await applicant.apply_to_job(job)
             if result.success:
                 results["success"] += 1
-            elif result.method in ("screenshot_only", "external_redirect", "manual_handoff", "form_filled"):
+            elif result.method in ("screenshot_only", "external_redirect", "manual_handoff",
+                                   "form_filled", "submitted_unconfirmed"):
                 results["needs_manual"] += 1
             else:
                 results["failed"] += 1

@@ -7,7 +7,7 @@ addopts = "-ra --strict-markers"
 
 [tool.ruff]
 line-length = 110
-target-version = "py312"
+target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
@@ -20,7 +20,7 @@ ignore = [
 "tests/*" = ["E402"]  # module-level DB patching in test_database.py is intentional
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.13"
 ignore_missing_imports = true  # playwright / telegram / pytz ship partial or no stubs
 files = ["config", "scraper", "applicant", "prompts", "telegram_bot", "tracker", "main.py"]
 

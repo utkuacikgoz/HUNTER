@@ -6,6 +6,7 @@ ROLE_MATCH_KEYWORDS. The board token doubles as the company name — the seeded
 tokens are the sponsor-friendly companies in SPONSOR_FRIENDLY_COMPANIES, so the
 downstream filter recognizes them as allowlisted.
 """
+import asyncio
 import html
 import logging
 import re
@@ -15,6 +16,7 @@ from datetime import date
 from config.settings import (
     ASHBY_BOARDS,
     ASHBY_US_BOARDS,
+    ATS_FETCH_CONCURRENCY,
     GREENHOUSE_BOARDS,
     GREENHOUSE_US_BOARDS,
     LEVER_BOARDS,
@@ -55,31 +57,56 @@ class AtsSource(ApiSource):
     def _title_matches(self, title: str) -> bool:
         return matches_role_title(title)
 
-    def _ordered_boards(self) -> list[str]:
-        """Priority tier first (rotated daily so its tail gets coverage over a span
-        of days), then the deprioritized tier in fixed order. The cap usually fills
-        within the priority tier, so the deprioritized tier is reached only when it
-        doesn't — keeping the review queue weighted toward priority boards."""
+    def _ordered_tiers(self) -> tuple[list[str], list[str]]:
+        """(priority tier, deprioritized tier).
+
+        The priority tier is rotated daily so its tail gets coverage over a span of
+        days. The cap usually fills within the priority tier, so the deprioritized
+        tier is reached only when it doesn't — keeping the review queue weighted
+        toward priority boards.
+        """
         pc = max(0, min(self.priority_count, len(self.boards)))
         priority, rest = self.boards[:pc], self.boards[pc:]
         if priority:
             offset = date.today().toordinal() % len(priority)
             priority = priority[offset:] + priority[:offset]
+        return priority, rest
+
+    def _ordered_boards(self) -> list[str]:
+        """Both tiers as one flat list, priority first."""
+        priority, rest = self._ordered_tiers()
         return priority + rest
 
     async def scrape(self, query: str = "", location: str = "", max_results: int = 10) -> list[dict]:
+        """Walk the configured boards in priority order until the cap is filled.
+
+        Boards are fetched a chunk at a time rather than one at a time: this source
+        covers ~50-60 boards per run and each is an independent HTTP round-trip, so
+        serial fetching made the scrape phase almost entirely latency. The chunk
+        boundary keeps priority order meaningful (a chunk is only started if the cap
+        isn't already filled) and bounds how many requests one ATS sees at once.
+        """
+        chunk_size = max(1, ATS_FETCH_CONCURRENCY)
         jobs: list[dict] = []
         scanned = 0
-        for board in self._ordered_boards():
-            try:
-                board_jobs = await self._fetch_board(board)
-            except Exception as e:
-                logger.warning(f"{self.platform_name}: board {board!r} failed: {e}")
-                continue
-            scanned += 1
-            jobs.extend(board_jobs)
+        # Tiers stay hard boundaries: the deprioritized tier is only started if the
+        # priority tier didn't fill the cap. Inside a tier, boards go out in chunks.
+        for tier in self._ordered_tiers():
             if len(jobs) >= max_results:
                 break
+            for start in range(0, len(tier), chunk_size):
+                chunk = tier[start:start + chunk_size]
+                results = await asyncio.gather(
+                    *(self._fetch_board(board) for board in chunk), return_exceptions=True
+                )
+                for board, result in zip(chunk, results, strict=True):
+                    if isinstance(result, BaseException):
+                        logger.warning(f"{self.platform_name}: board {board!r} failed: {result}")
+                        continue
+                    scanned += 1
+                    jobs.extend(result)
+                if len(jobs) >= max_results:
+                    break
         logger.info(
             f"{self.platform_name}: {len(jobs)} matching role(s) from {scanned}/{len(self.boards)} board(s)"
         )
