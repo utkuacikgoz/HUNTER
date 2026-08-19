@@ -260,3 +260,58 @@ class TestFallbackCoverLetterGeneric:
         # None of Utku's old hardcoded specifics leak in for other profiles.
         for leak in ("8+ years", "BiLira", "Upshift", "Senior Product Manager", "11+ digital products"):
             assert leak not in letter
+
+
+class TestAutoApplyDisabledGuards:
+    """Telegram cards outlive a config change: a card sent while ENABLE_AUTO_APPLY
+    was on still shows Approve / Apply Now after the profile switches to
+    sourcing-only. Those taps must not submit an application."""
+
+    class FakeQuery:
+        def __init__(self):
+            self.texts = []
+
+        async def edit_message_text(self, text, **kwargs):
+            self.texts.append(text)
+
+    JOB = {"id": 7, "title": "PM", "company": "Acme", "url": "https://x/y", "platform": "greenhouse"}
+
+    async def test_approve_refuses_when_auto_apply_off(self, monkeypatch):
+        import telegram_bot.bot as bot
+
+        def boom(*a, **k):
+            raise AssertionError("job must not be approved when auto-apply is off")
+
+        monkeypatch.setattr(bot, "ENABLE_AUTO_APPLY", False)
+        monkeypatch.setattr(bot, "approve_job", boom)
+
+        q = self.FakeQuery()
+        await bot._handle_approve(q, self.JOB)
+
+        assert any("Auto-apply is off" in t for t in q.texts)
+        assert any(self.JOB["url"] in t for t in q.texts)  # manual path still offered
+
+    async def test_applynow_does_not_enqueue_when_auto_apply_off(self, monkeypatch):
+        import telegram_bot.bot as bot
+
+        monkeypatch.setattr(bot, "ENABLE_AUTO_APPLY", False)
+        before = bot._apply_queue.qsize()
+
+        q = self.FakeQuery()
+        await bot._handle_applynow(q, self.JOB)
+
+        assert bot._apply_queue.qsize() == before  # nothing queued for the worker
+        assert any("Auto-apply is off" in t for t in q.texts)
+
+    async def test_applynow_still_enqueues_when_auto_apply_on(self, monkeypatch):
+        import telegram_bot.bot as bot
+
+        monkeypatch.setattr(bot, "ENABLE_AUTO_APPLY", True)
+        monkeypatch.setattr(bot, "_ensure_apply_worker", lambda: None)  # don't start a worker
+
+        q = self.FakeQuery()
+        await bot._handle_applynow(q, self.JOB)
+
+        assert bot._apply_queue.qsize() == 1
+        bot._apply_queue.get_nowait()
+        bot._apply_queue.task_done()

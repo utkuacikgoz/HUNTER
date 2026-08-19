@@ -142,3 +142,87 @@ async def test_apply_marks_approved_jobs_applied(temp_db, monkeypatch):
 
     assert result["success"] == 1
     assert database.get_job_by_id(job_id)["status"] == "applied"
+
+
+def test_velocity_boost_ranks_inside_verdict_groups(temp_db, monkeypatch):
+    # The velocity boost must not promote a flagged job over a confident include:
+    # verdict is the primary key, velocity only reorders jobs sharing a verdict.
+    database.insert_job(
+        title="PM", company="ColdCo", location="Remote EU", salary="",
+        url="https://example.com/cold-include", platform="greenhouse", description="",
+        filter_verdict="include",
+    )
+    database.insert_job(
+        title="PM", company="HotCo", location="Remote EU", salary="",
+        url="https://example.com/hot-flag", platform="greenhouse", description="",
+        filter_verdict="flag",
+    )
+    database.insert_job(
+        title="PM", company="HotCo", location="Remote EU", salary="",
+        url="https://example.com/hot-include", platform="greenhouse", description="",
+        filter_verdict="include",
+    )
+
+    monkeypatch.setattr(main, "VELOCITY_BOOST_RANK", True)
+    ranked = main._rank_pending_by_velocity({"hotco": 9})
+
+    assert [j["url"] for j in ranked] == [
+        "https://example.com/hot-include",   # include, hot company first
+        "https://example.com/cold-include",  # include, cold company
+        "https://example.com/hot-flag",      # flag never outranks an include
+    ]
+
+
+def test_velocity_boost_off_keeps_db_order(temp_db, monkeypatch):
+    database.insert_job(
+        title="PM", company="ColdCo", location="Remote EU", salary="",
+        url="https://example.com/a", platform="greenhouse", description="",
+        filter_verdict="include",
+    )
+    database.insert_job(
+        title="PM", company="HotCo", location="Remote EU", salary="",
+        url="https://example.com/b", platform="greenhouse", description="",
+        filter_verdict="include",
+    )
+    monkeypatch.setattr(main, "VELOCITY_BOOST_RANK", False)
+    ranked = main._rank_pending_by_velocity({"hotco": 9})
+    assert [j["url"] for j in ranked] == [j["url"] for j in database.get_pending_jobs()]
+
+
+class _EmptySource:
+    """Stand-in source that always comes back with nothing."""
+    platform_name = "flaky"
+    accepts_query = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def scrape(self, query="", location="", max_results=10):
+        return []
+
+
+async def test_zero_yield_source_is_paused_and_alerts_once(temp_db, monkeypatch):
+    # A source that goes quiet gets paused, and the user is told at the transition
+    # — the worker's logs are ephemeral, so a silently dropped source is otherwise
+    # invisible. Subsequent runs skip it without re-alerting.
+    alerts = []
+
+    async def fake_alert(text):
+        alerts.append(text)
+
+    monkeypatch.setattr(main, "_build_scrapers", lambda: [_EmptySource()])
+    monkeypatch.setattr(main, "send_telegram_alert", fake_alert)
+    monkeypatch.setattr(main, "SCRAPER_SKIP_AFTER_ZEROS", 1)
+    monkeypatch.setattr(main, "SCRAPER_RETRY_AFTER_DAYS", 3)
+
+    assert await main._scrape_all() == []
+    assert len(alerts) == 1
+    assert "flaky" in alerts[0]
+    assert "3d" in alerts[0]  # tells the user it comes back by itself
+
+    # Next hunt: skipped, so no second alert and no new health row.
+    assert await main._scrape_all() == []
+    assert len(alerts) == 1
