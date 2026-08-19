@@ -540,3 +540,24 @@ class TestDedupSuppression:
         reject_job(a)
         b = insert_job("Product Manager", "Acme", "Remote", "", "https://b.com/bf2", "lever")
         assert b not in {j["id"] for j in get_pending_jobs()}
+
+
+class TestUnconfirmedSubmitTracking:
+    """The apply engine records an unconfirmed submit so it never re-applies."""
+
+    def test_absent_by_default(self):
+        from tracker.database import has_unconfirmed_submit
+        job_id = insert_job("PM", "Co", "Remote", "", "https://example.com/unconf1", "greenhouse")
+        assert has_unconfirmed_submit(job_id) is False
+
+    def test_detected_after_logging(self):
+        from tracker.database import has_unconfirmed_submit
+        job_id = insert_job("PM", "Co", "Remote", "", "https://example.com/unconf2", "greenhouse")
+        log_action(job_id, "apply_submitted_unconfirmed", "no confirmation seen")
+        assert has_unconfirmed_submit(job_id) is True
+
+    def test_other_actions_do_not_count(self):
+        from tracker.database import has_unconfirmed_submit
+        job_id = insert_job("PM", "Co", "Remote", "", "https://example.com/unconf3", "greenhouse")
+        log_action(job_id, "apply_failed", "selector missing")
+        assert has_unconfirmed_submit(job_id) is False
