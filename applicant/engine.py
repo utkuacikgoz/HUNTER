@@ -52,6 +52,7 @@ STEP_PAUSE_S = 1.5               # pause between LinkedIn Easy Apply steps
 MAX_FORM_STEPS = 10              # max LinkedIn multi-step form pages to traverse
 MENU_SETTLE_S = 0.4              # pause for a dropdown menu to render its options
 CONFIRM_TIMEOUT_S = 15           # how long to wait for a submit to be confirmed
+CLICK_TIMEOUT_MS = 5000          # per-click actionability wait (Playwright's default is 30s)
 
 # Resolve the question text for a form control: <label for=id>, then an enclosing
 # label, then aria-label / name. Shared by every field-filling pass so they all read
@@ -497,6 +498,12 @@ class AutoApplicant:
         # Residency/tax questions follow from where the candidate actually lives.
         if "tax resident" in h or "resident of" in h:
             return "yes" if COMMON_ANSWERS["us_tax_resident"].lower().startswith("y") else "no"
+        # Mandatory consent/acknowledgement questions ("do you consent to us storing
+        # your application?"). The user approved this specific job for auto-apply, and
+        # the ATS won't accept the application without it, so the affirmative option
+        # is chosen — see _match_option, which refuses any negated variant.
+        if "consent" in h or "privacy" in h or "agree to" in h or "acknowledge" in h:
+            return "consent"
         if "hear about" in h or "how did you" in h or "referr" in h or "source" in h:
             return COMMON_ANSWERS["referral_source"].lower()
         # Location dropdowns are split into country and city on most ATS forms, and a
@@ -516,7 +523,18 @@ class AutoApplicant:
         if target == "decline":
             for i, txt in enumerate(lowered):
                 if any(p in txt for p in ("decline", "prefer not", "wish not", "do not wish",
-                                          "not to answer", "not to say", "rather not")):
+                                          "not to answer", "not to say", "rather not",
+                                          "do not want to answer", "don't want to answer",
+                                          "not disclose", "choose not")):
+                    return i
+            return None
+        if target == "consent":
+            negated = ("not ", "n't", "withdraw", "decline", "refuse", "object")
+            for i, txt in enumerate(lowered):
+                if any(n in txt for n in negated):
+                    continue
+                if txt.startswith(("i consent", "consent", "i agree", "agree", "yes")) or \
+                        "i consent" in txt or "i agree" in txt:
                     return i
             return None
         if target in ("yes", "no"):
@@ -562,6 +580,25 @@ class AutoApplicant:
             except Exception as e:
                 logger.debug(f"select fill skipped: {e}")
 
+    async def _safe_click(self, el) -> bool:
+        """Scroll into view, then click with a short timeout.
+
+        Playwright's default 30s actionability wait turns one covered element into a
+        30-second stall; an open dropdown overlapping the next field did exactly that
+        three times per Greenhouse form, so a single application took minutes and
+        left the covered questions unanswered.
+        """
+        try:
+            await el.scroll_into_view_if_needed(timeout=CLICK_TIMEOUT_MS)
+        except Exception as e:
+            logger.debug(f"scroll_into_view failed: {e}")
+        try:
+            await el.click(timeout=CLICK_TIMEOUT_MS)
+            return True
+        except Exception as e:
+            logger.debug(f"click failed: {e}")
+            return False
+
     async def _fill_comboboxes(self, page: Page, job: dict | None = None) -> None:
         """Answer react-select style comboboxes.
 
@@ -578,6 +615,12 @@ class AutoApplicant:
         """
         for box in await page.query_selector_all("input[role='combobox']"):
             try:
+                # Only comboboxes that belong to the application form: job boards put
+                # their own search box on the same page, and answering that one both
+                # costs a model call and types into the wrong field.
+                in_form = await box.evaluate("el => !!el.closest('form')")
+                if not in_form:
+                    continue
                 answered = await box.evaluate(
                     "el => !!el.closest('.select, [class*=select]')"
                     "?.querySelector('.select__single-value, [class*=singleValue]')"
@@ -587,6 +630,8 @@ class AutoApplicant:
                 label = await box.evaluate(_LABEL_JS)
                 if not label:
                     continue
+                # Close anything still open so it can't cover the next field.
+                await page.keyboard.press("Escape")
                 await self._pick_combobox_option(page, box, label)
                 await asyncio.sleep(0.2)
             except Exception as e:
@@ -595,13 +640,17 @@ class AutoApplicant:
     async def _pick_combobox_option(self, page: Page, box, label: str) -> bool:
         """Open one combobox, choose an option, and click it. True if answered."""
         target = self._select_target(label)
-        await box.click()
+        if not await self._safe_click(box):
+            return False
         await asyncio.sleep(MENU_SETTLE_S)
 
         # Long filterable lists (country, city) only render matching options once
         # you type, so type the literal answer first.
-        if target and target not in ("yes", "no", "decline"):
-            await box.type(target, delay=15)
+        if target and target not in ("yes", "no", "decline", "consent"):
+            try:
+                await box.type(target, delay=15)
+            except Exception as e:
+                logger.debug(f"combobox type failed: {e}")
             await asyncio.sleep(MENU_SETTLE_S)
 
         options = await page.query_selector_all("[role='option']")
@@ -623,9 +672,37 @@ class AutoApplicant:
             await page.keyboard.press("Escape")
             logger.info(f"No answer for dropdown {label[:60]!r} — left blank")
             return False
-        await options[index].click()
-        logger.debug(f"dropdown {label[:40]!r} -> {texts[index][:40]!r}")
-        return True
+        picked = await self._safe_click(options[index])
+        await page.keyboard.press("Escape")
+        if picked:
+            logger.debug(f"dropdown {label[:40]!r} -> {texts[index][:40]!r}")
+        return picked
+
+    async def _check_required_boxes(self, page: Page) -> list[str]:
+        """Tick required, unticked checkboxes and return their labels.
+
+        These are the ATS's mandatory acknowledgements (data-processing consent,
+        "I confirm the above is accurate"); an application cannot be submitted with
+        one unticked, so leaving them alone means never completing a Greenhouse
+        application. Strictly limited to REQUIRED boxes — optional ones (marketing
+        opt-ins, talent-pool sign-ups) are never touched — and every box ticked is
+        returned so it lands in the application log.
+        """
+        ticked: list[str] = []
+        for box in await page.query_selector_all(
+            "input[type='checkbox'][required], input[type='checkbox'][aria-required='true']"
+        ):
+            try:
+                if await box.is_checked():
+                    continue
+                label = await box.evaluate(_LABEL_JS)
+                if await self._safe_click(box) and await box.is_checked():
+                    ticked.append(label or "(unlabeled required checkbox)")
+            except Exception as e:
+                logger.debug(f"required checkbox skipped: {e}")
+        if ticked:
+            logger.info(f"Accepted {len(ticked)} required consent box(es): {ticked}")
+        return ticked
 
     async def _missing_required_fields(self, page: Page) -> list[str]:
         """Labels of required fields that are still empty.
@@ -666,9 +743,15 @@ class AutoApplicant:
                     if (l) label = l.textContent;
                 }
                 if (!label) {
-                    const wrap = el.closest('.field-wrapper, .field, .select, div');
-                    const l = wrap?.querySelector('label, legend');
-                    if (l) label = l.textContent;
+                    // Walk up until a label turns up: react-select's hidden mirror
+                    // input (the element that actually carries `required`) sits
+                    // several divs below the question's label.
+                    let node = el.parentElement;
+                    for (let i = 0; i < 6 && node && !label; i++) {
+                        const l = node.querySelector('label, legend');
+                        if (l) label = l.textContent;
+                        node = node.parentElement;
+                    }
                 }
                 label = (label || el.getAttribute('aria-label') || el.getAttribute('name') || '')
                     .replace(/\s+/g, ' ').replace(/\*$/, '').trim();
@@ -865,6 +948,7 @@ class AutoApplicant:
             # react-select comboboxes.
             await self._fill_comboboxes(page, job)
             await self._fill_radios(page)
+            await self._check_required_boxes(page)
             return await self._submit_and_confirm(
                 page, job, "greenhouse",
                 submit_selectors=[
@@ -909,6 +993,7 @@ class AutoApplicant:
             await self._fill_selects(page)
             await self._fill_comboboxes(page, job)
             await self._fill_radios(page)
+            await self._check_required_boxes(page)
             return await self._submit_and_confirm(
                 page, job, "lever",
                 submit_selectors=["button[type='submit']", "button:has-text('Submit application')", "#btn-submit"],
@@ -956,6 +1041,7 @@ class AutoApplicant:
             await self._fill_selects(page)
             await self._fill_comboboxes(page, job)
             await self._fill_radios(page)
+            await self._check_required_boxes(page)
             return await self._submit_and_confirm(
                 page, job, "ashby",
                 submit_selectors=[
