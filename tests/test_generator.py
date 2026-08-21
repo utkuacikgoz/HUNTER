@@ -232,3 +232,80 @@ class TestFieldMatching:
     def test_unknown_field_returns_empty(self):
         result = self.applicant._match_field_value("favorite color", "cover")
         assert result == ""
+
+
+class TestChooseDropdownOption:
+    """The dropdown chooser may only ever return a valid index into the options
+    it was given — an application is submitted under the user's name."""
+
+    def _fake_client(self, monkeypatch, raw):
+        import prompts.generator as g
+
+        class FakeResponse:
+            content = [type("Block", (), {"text": raw})()]
+
+        class FakeMessages:
+            def create(self, **kwargs):
+                return FakeResponse()
+
+        class FakeClient:
+            messages = FakeMessages()
+
+        monkeypatch.setattr(g, "_get_client", lambda: FakeClient())
+        monkeypatch.setattr(g, "ANTHROPIC_API_KEY", "test-key")
+        g._DROPDOWN_CACHE.clear()
+        return g
+
+    def test_returns_index_from_model(self, monkeypatch):
+        g = self._fake_client(monkeypatch, '{"index": 1}')
+        assert g.choose_dropdown_option("Work authorization?", ["Citizen", "Need visa"]) == 1
+
+    def test_out_of_range_index_is_rejected(self, monkeypatch):
+        g = self._fake_client(monkeypatch, '{"index": 7}')
+        assert g.choose_dropdown_option("Work authorization?", ["Citizen", "Need visa"]) is None
+
+    def test_null_index_leaves_the_field_alone(self, monkeypatch):
+        g = self._fake_client(monkeypatch, '{"index": null}')
+        assert g.choose_dropdown_option("Personal question?", ["A", "B"]) is None
+
+    def test_bool_is_not_accepted_as_an_index(self, monkeypatch):
+        # json true would otherwise sneak through as index 1.
+        g = self._fake_client(monkeypatch, '{"index": true}')
+        assert g.choose_dropdown_option("Work authorization?", ["Citizen", "Need visa"]) is None
+
+    def test_garbage_response_is_survivable(self, monkeypatch):
+        g = self._fake_client(monkeypatch, "I think option two, personally")
+        assert g.choose_dropdown_option("Work authorization?", ["Citizen", "Need visa"]) is None
+
+    def test_fenced_json_is_unwrapped(self, monkeypatch):
+        g = self._fake_client(monkeypatch, '```json\n{"index": 0}\n```')
+        assert g.choose_dropdown_option("Work authorization?", ["Citizen", "Need visa"]) == 0
+
+    def test_no_api_key_means_no_call(self, monkeypatch):
+        import prompts.generator as g
+        monkeypatch.setattr(g, "ANTHROPIC_API_KEY", "")
+        g._DROPDOWN_CACHE.clear()
+        assert g.choose_dropdown_option("Anything?", ["A", "B"]) is None
+
+    def test_huge_option_lists_are_not_sent(self, monkeypatch):
+        g = self._fake_client(monkeypatch, '{"index": 0}')
+        assert g.choose_dropdown_option("Country?", [f"C{i}" for i in range(200)]) is None
+
+    def test_result_is_cached_per_question(self, monkeypatch):
+        import prompts.generator as g
+        calls = {"n": 0}
+
+        class FakeResponse:
+            content = [type("Block", (), {"text": '{"index": 0}'})()]
+
+        class FakeMessages:
+            def create(self, **kwargs):
+                calls["n"] += 1
+                return FakeResponse()
+
+        monkeypatch.setattr(g, "_get_client", lambda: type("C", (), {"messages": FakeMessages()})())
+        monkeypatch.setattr(g, "ANTHROPIC_API_KEY", "test-key")
+        g._DROPDOWN_CACHE.clear()
+        for _ in range(3):
+            g.choose_dropdown_option("Same question?", ["A", "B"])
+        assert calls["n"] == 1

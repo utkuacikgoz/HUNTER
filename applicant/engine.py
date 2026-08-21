@@ -51,8 +51,53 @@ PAGE_SETTLE_S = 2                # pause after navigation / clicks for JS to ren
 STEP_PAUSE_S = 1.5               # pause between LinkedIn Easy Apply steps
 MAX_FORM_STEPS = 10              # max LinkedIn multi-step form pages to traverse
 MENU_SETTLE_S = 0.4              # pause for a dropdown menu to render its options
+OPTION_WAIT_S = 3.0              # how long to wait for a filtered option list to arrive
 CONFIRM_TIMEOUT_S = 15           # how long to wait for a submit to be confirmed
 CLICK_TIMEOUT_MS = 5000          # per-click actionability wait (Playwright's default is 30s)
+
+# Collect radio / checkbox groups as {key: {question, kind, required, checked, options}}.
+# Grouped by `name` so a single-select rendered as several checkboxes (Lever's custom
+# cards) is answered with exactly one option. The question is the nearest label that
+# isn't one of the group's own option labels — otherwise "Woman" reads as the question.
+_CHOICE_GROUPS_JS = r"""() => {
+    const out = {};
+    document.querySelectorAll('input[type=radio], input[type=checkbox]').forEach((el, i) => {
+        const name = el.getAttribute('name') || ('__unnamed_' + i);
+        const optLabel = (
+            (el.id && document.querySelector('label[for="' + (window.CSS?.escape ? CSS.escape(el.id) : el.id) + '"]')?.textContent)
+            || el.closest('label')?.textContent
+            || el.getAttribute('value') || ''
+        ).replace(/\s+/g, ' ').trim();
+        if (!out[name]) {
+            out[name] = {question: '', kind: el.getAttribute('type'), required: false,
+                         checked: false, options: []};
+        }
+        out[name].options.push({id: el.id, name: el.getAttribute('name'),
+                                value: el.getAttribute('value'), label: optLabel});
+        if (el.required || el.getAttribute('aria-required') === 'true') out[name].required = true;
+        if (el.checked) out[name].checked = true;
+    });
+    document.querySelectorAll('input[type=radio], input[type=checkbox]').forEach((el, i) => {
+        const name = el.getAttribute('name') || ('__unnamed_' + i);
+        const grp = out[name];
+        if (!grp || grp.question) return;
+        const own = new Set(grp.options.map(o => o.label.toLowerCase()));
+        let node = el;
+        for (let d = 0; d < 8 && node; d++) {
+            node = node.parentElement;
+            if (!node) break;
+            const cand = node.querySelector('.application-label, legend, .field-label, label');
+            if (cand) {
+                const t = cand.textContent.replace(/\s+/g, ' ').trim();
+                if (t && !own.has(t.toLowerCase()) && !/^(yes|no)$/i.test(t)) {
+                    grp.question = t.slice(0, 200);
+                    break;
+                }
+            }
+        }
+    });
+    return out;
+}"""
 
 # Resolve the question text for a form control: <label for=id>, then an enclosing
 # label, then aria-label / name. Shared by every field-filling pass so they all read
@@ -383,6 +428,11 @@ class AutoApplicant:
             return COMMON_ANSWERS["salary"]
         if "cover letter" in hint or "letter" in hint:
             return cover_letter
+        # Lever asks for these as their own required fields ("org", "Current company").
+        if "current company" in hint or "current employer" in hint or hint.strip() == "org":
+            return COMMON_ANSWERS["current_company"]
+        if "current title" in hint or "current role" in hint or "job title" in hint:
+            return COMMON_ANSWERS["current_title"]
         if "experience" in hint and "year" in hint:
             return COMMON_ANSWERS["years_experience"]
         if any(w in hint for w in ["remote", "work from home", "wfh"]):
@@ -433,6 +483,56 @@ class AutoApplicant:
                     return True
                 except Exception as e:
                     logger.debug(f"fill {sel} failed: {e}")
+        return False
+
+    async def _fill_typeahead(self, page: Page, selectors: list[str], value: str) -> bool:
+        """Fill a geocoder-style autocomplete and select a suggestion.
+
+        Lever's "Current location" only counts as answered once a suggestion is
+        picked (it writes a hidden `selectedLocation`); typing alone leaves the field
+        failing validation. The suggestion list renders inside a container the widget
+        keeps `display:none`, so the click is dispatched in-page — Playwright rightly
+        refuses to click an invisible element.
+        """
+        if not value:
+            return False
+        for sel in selectors:
+            el = await page.query_selector(sel)
+            if not el:
+                continue
+            # Click when the field allows it (some widgets only start their lookup on
+            # a real pointer event), else fall back to focus for fields that never
+            # become "actionable".
+            try:
+                await el.click(timeout=CLICK_TIMEOUT_MS)
+            except Exception as e:
+                logger.debug(f"typeahead click failed for {sel}, using focus: {e}")
+                try:
+                    await el.focus()
+                except Exception as focus_err:
+                    logger.debug(f"typeahead focus failed for {sel}: {focus_err}")
+                    continue
+            try:
+                await page.keyboard.type(value, delay=40)
+            except Exception as e:
+                logger.debug(f"typeahead type failed for {sel}: {e}")
+                continue
+            deadline = asyncio.get_running_loop().time() + OPTION_WAIT_S
+            while asyncio.get_running_loop().time() < deadline:
+                suggestion = await page.query_selector(
+                    ".dropdown-results > *, [role='option'], .location-suggestion"
+                )
+                if suggestion:
+                    try:
+                        await suggestion.evaluate("el => el.click()")
+                        await asyncio.sleep(0.3)
+                        logger.debug(f"typeahead {sel} -> {(await suggestion.inner_text())[:40]!r}")
+                        return True
+                    except Exception as e:
+                        logger.debug(f"typeahead select failed: {e}")
+                        return False
+                await asyncio.sleep(0.2)
+            logger.info(f"No suggestions for {sel} ({value!r}) — left as typed")
         return False
 
     async def _upload_resume(self, page: Page, selectors: list[str]) -> None:
@@ -613,19 +713,25 @@ class AutoApplicant:
         list. Demographic questions never reach the model — they resolve to "decline"
         by rule, and are skipped entirely if no decline-style option exists.
         """
-        for box in await page.query_selector_all("input[role='combobox']"):
+        # Answering one react-select re-renders the form, which detaches every element
+        # handle captured before it: the stale handles then just time out, silently
+        # leaving the rest of the questions blank. So collect ids once and re-query
+        # each box immediately before touching it.
+        # Only comboboxes inside the form: job boards put their own search box on the
+        # page, and answering that one costs a model call and types into the wrong field.
+        ids = await page.evaluate(
+            "() => Array.from(document.querySelectorAll('form input[role=combobox]'))"
+            ".map(el => el.getAttribute('id') || '')"
+        )
+        for position, box_id in enumerate(ids):
             try:
-                # Only comboboxes that belong to the application form: job boards put
-                # their own search box on the same page, and answering that one both
-                # costs a model call and types into the wrong field.
-                in_form = await box.evaluate("el => !!el.closest('form')")
-                if not in_form:
+                box = await self._combobox_handle(page, box_id, position)
+                if box is None:
                     continue
-                answered = await box.evaluate(
-                    "el => !!el.closest('.select, [class*=select]')"
-                    "?.querySelector('.select__single-value, [class*=singleValue]')"
-                )
-                if answered:
+                if await box.evaluate("el => { const r = el.getBoundingClientRect();"
+                                      " return r.width === 0 && r.height === 0; }"):
+                    continue  # e.g. the phone widget's hidden country search input
+                if await self._combobox_has_value(page, box):
                     continue
                 label = await box.evaluate(_LABEL_JS)
                 if not label:
@@ -637,24 +743,53 @@ class AutoApplicant:
             except Exception as e:
                 logger.debug(f"combobox skipped: {e}")
 
+    async def _combobox_handle(self, page: Page, box_id: str, position: int):
+        """A fresh handle for one combobox: by id, else by position in the form."""
+        if box_id:
+            # Attribute selector, not '#id': Greenhouse uses numeric ids ("627"),
+            # which are not valid CSS id selectors.
+            return await page.query_selector(f'form input[role="combobox"][id="{box_id}"]')
+        boxes = await page.query_selector_all("form input[role='combobox']")
+        return boxes[position] if position < len(boxes) else None
+
     async def _pick_combobox_option(self, page: Page, box, label: str) -> bool:
         """Open one combobox, choose an option, and click it. True if answered."""
         target = self._select_target(label)
-        if not await self._safe_click(box):
+        # Open with the keyboard, not the mouse. These inputs are ~4px wide and shift
+        # as the form re-renders around them, so Playwright's actionability check
+        # ("visible and stable") times out on a plain click — which is what silently
+        # left the required work-authorization and location questions blank. focus()
+        # has no such wait, and react-select opens its menu on ArrowDown.
+        try:
+            await box.focus()
+        except Exception as e:
+            logger.debug(f"combobox focus failed: {e}")
             return False
+        await page.keyboard.press("ArrowDown")
         await asyncio.sleep(MENU_SETTLE_S)
 
         # Long filterable lists (country, city) only render matching options once
         # you type, so type the literal answer first.
-        if target and target not in ("yes", "no", "decline", "consent"):
-            try:
-                await box.type(target, delay=15)
-            except Exception as e:
-                logger.debug(f"combobox type failed: {e}")
-            await asyncio.sleep(MENU_SETTLE_S)
+        typed = target if target and target not in ("yes", "no", "decline", "consent") else None
+        if typed:
+            await page.keyboard.type(typed, delay=15)
 
-        options = await page.query_selector_all("[role='option']")
-        texts = [((await o.inner_text()) or "").strip() for o in options]
+        # Some lists are served by a lookup that answers well after the keystrokes
+        # (Greenhouse's city field is a geocoder), so poll rather than sleep once.
+        options: list = []
+        texts: list[str] = []
+        deadline = asyncio.get_running_loop().time() + (
+            OPTION_WAIT_S if typed is not None else MENU_SETTLE_S
+        )
+        while True:
+            options = await page.query_selector_all("[role='option']")
+            texts = [((await o.inner_text()) or "").strip() for o in options]
+            if texts and (typed is None or self._match_option(typed, texts) is not None):
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                break
+            await asyncio.sleep(0.2)
+
         if not texts:
             await page.keyboard.press("Escape")
             return False
@@ -673,36 +808,28 @@ class AutoApplicant:
             logger.info(f"No answer for dropdown {label[:60]!r} — left blank")
             return False
         picked = await self._safe_click(options[index])
+        if not picked:
+            # Menu re-rendered under the pointer: walk to the option with the keyboard
+            # instead (react-select highlights the first option when the menu opens).
+            for _ in range(index):
+                await page.keyboard.press("ArrowDown")
+            await page.keyboard.press("Enter")
+            picked = await self._combobox_has_value(page, box)
         await page.keyboard.press("Escape")
         if picked:
             logger.debug(f"dropdown {label[:40]!r} -> {texts[index][:40]!r}")
         return picked
 
-    async def _check_required_boxes(self, page: Page) -> list[str]:
-        """Tick required, unticked checkboxes and return their labels.
-
-        These are the ATS's mandatory acknowledgements (data-processing consent,
-        "I confirm the above is accurate"); an application cannot be submitted with
-        one unticked, so leaving them alone means never completing a Greenhouse
-        application. Strictly limited to REQUIRED boxes — optional ones (marketing
-        opt-ins, talent-pool sign-ups) are never touched — and every box ticked is
-        returned so it lands in the application log.
-        """
-        ticked: list[str] = []
-        for box in await page.query_selector_all(
-            "input[type='checkbox'][required], input[type='checkbox'][aria-required='true']"
-        ):
-            try:
-                if await box.is_checked():
-                    continue
-                label = await box.evaluate(_LABEL_JS)
-                if await self._safe_click(box) and await box.is_checked():
-                    ticked.append(label or "(unlabeled required checkbox)")
-            except Exception as e:
-                logger.debug(f"required checkbox skipped: {e}")
-        if ticked:
-            logger.info(f"Accepted {len(ticked)} required consent box(es): {ticked}")
-        return ticked
+    async def _combobox_has_value(self, page: Page, box) -> bool:
+        """True once the combobox shows a selected value."""
+        try:
+            return bool(await box.evaluate(
+                "el => !!el.closest('.select, [class*=select]')"
+                "?.querySelector('.select__single-value, [class*=singleValue]')"
+            ))
+        except Exception as e:
+            logger.debug(f"combobox value check failed: {e}")
+            return False
 
     async def _missing_required_fields(self, page: Page) -> list[str]:
         """Labels of required fields that are still empty.
@@ -788,48 +915,92 @@ class AutoApplicant:
             await asyncio.sleep(0.5)
         return False
 
-    async def _fill_radios(self, page: Page) -> None:
-        """Answer Yes/No radio-group questions (Ashby uses radios, not selects, for
-        the work-authorization / sponsorship / EEO questions)."""
-        groups = await page.evaluate(
-            """() => {
-                const out = {};
-                document.querySelectorAll('input[type=radio]').forEach(r => {
-                    const optLabel = (r.id && document.querySelector('label[for="'+r.id+'"]')?.textContent || '').trim();
-                    let q = '', el = r;
-                    for (let i = 0; i < 6 && el; i++) {
-                        el = el.parentElement;
-                        if (!el) break;
-                        const lab = el.querySelector('label, legend');
-                        if (lab) {
-                            const t = lab.textContent.trim();
-                            if (t && !/^(yes|no)$/i.test(t)) { q = t; break; }
-                        }
-                    }
-                    if (!out[r.name]) out[r.name] = {question: q, options: []};
-                    out[r.name].options.push({id: r.id, label: optLabel});
-                });
-                return out;
-            }"""
-        )
+    async def _fill_choice_groups(self, page: Page) -> list[str]:
+        """Answer radio groups, checkbox groups, and standalone consent checkboxes.
+
+        These are one mechanism, not three: an ATS renders a single-select question as
+        radios (Ashby) or as a group of checkboxes sharing a name (Lever's custom
+        cards). They must be answered with exactly ONE option — ticking every required
+        checkbox in a group would answer "No" *and* "Yes" to the same question.
+
+        A required checkbox that is alone in its group is a mandatory acknowledgement
+        (data-processing consent, "I confirm the above"); the application cannot be
+        submitted without it, so it is ticked and returned for the application log.
+        Optional checkboxes — marketing opt-ins, talent-pool sign-ups — are never
+        touched.
+
+        Rules first, then the model picks from the real option labels; demographic
+        questions resolve to "decline" by rule and never reach the model.
+        """
+        groups = await page.evaluate(_CHOICE_GROUPS_JS)
+        consented: list[str] = []
         for grp in groups.values():
-            target = self._select_target(grp.get("question", ""))
-            if not target:
+            try:
+                if grp.get("checked"):
+                    continue
+                options = grp.get("options", [])
+                labels = [(o.get("label") or "").strip() for o in options]
+                question = grp.get("question", "")
+
+                # Lone required checkbox => mandatory acknowledgement.
+                if grp.get("kind") == "checkbox" and len(options) == 1:
+                    if not grp.get("required"):
+                        continue
+                    if await self._click_choice(page, options[0]):
+                        consented.append(question or labels[0] or "(unlabeled consent box)")
+                    continue
+
+                target = self._select_target(question)
+                index = self._match_option(target, labels) if target else None
+                if index is None:
+                    if target == "decline":
+                        continue  # leave a demographic question blank, never guess
+                    index = await asyncio.to_thread(choose_dropdown_option, question, labels)
+                if index is None or index >= len(options):
+                    continue
+                if await self._click_choice(page, options[index]):
+                    logger.debug(f"choice {question[:40]!r} -> {labels[index][:40]!r}")
+            except Exception as e:
+                logger.debug(f"choice group skipped: {e}")
+        if consented:
+            logger.info(f"Accepted {len(consented)} required consent box(es): {consented}")
+        return consented
+
+    async def _click_choice(self, page: Page, option: dict) -> bool:
+        """Tick one radio/checkbox.
+
+        The input itself is usually visually hidden behind a styled label, so a real
+        click on it never becomes actionable — Lever's survey inputs and Ashby's
+        radios both fail that way. Try the label, then the input, then dispatch the
+        click in-page, which is what actually works for a hidden input.
+        """
+        selectors = []
+        if option.get("id"):
+            selectors.append(f'label[for="{option["id"]}"]')
+        if option.get("name") and option.get("value") is not None:
+            selectors.append(f'input[name="{option["name"]}"][value="{option["value"]}"]')
+
+        handle = None
+        for sel in selectors:
+            try:
+                await page.click(sel, timeout=CLICK_TIMEOUT_MS)
+                return True
+            except Exception as e:
+                logger.debug(f"choice click {sel} failed: {e}")
+                if handle is None:
+                    handle = await page.query_selector(sel)
+        # Last resort: click it from inside the page. A hidden <input type=radio>
+        # still toggles and still fires change/input handlers this way.
+        for sel in selectors:
+            el = await page.query_selector(sel)
+            if el is None:
                 continue
-            for opt in grp["options"]:
-                lab = (opt["label"] or "").strip().lower()
-                if target in ("yes", "no"):
-                    match = lab == target or lab.startswith(target)
-                elif target == "decline":
-                    match = any(p in lab for p in ("decline", "prefer not", "wish not"))
-                else:
-                    match = target in lab
-                if match and opt["id"]:
-                    try:
-                        await page.click(f'label[for="{opt["id"]}"]')
-                    except Exception as e:
-                        logger.debug(f"radio click failed: {e}")
-                    break
+            try:
+                await el.evaluate("el => el.click()")
+                return True
+            except Exception as e:
+                logger.debug(f"in-page choice click {sel} failed: {e}")
+        return False
 
     async def _submit_and_confirm(
         self, page: Page, job: dict, platform: str, *,
@@ -947,8 +1118,7 @@ class AutoApplicant:
             # <select> at all — country, city, work authorization and EEO are all
             # react-select comboboxes.
             await self._fill_comboboxes(page, job)
-            await self._fill_radios(page)
-            await self._check_required_boxes(page)
+            await self._fill_choice_groups(page)
             return await self._submit_and_confirm(
                 page, job, "greenhouse",
                 submit_selectors=[
@@ -983,6 +1153,13 @@ class AutoApplicant:
             await self._set_first(page, ["input[name='name']"], COMMON_ANSWERS["name"])
             await self._set_first(page, ["input[name='email']"], COMMON_ANSWERS["email"])
             await self._set_first(page, ["input[name='phone']"], COMMON_ANSWERS["phone"])
+            # Lever requires location (geocoder-backed) and current employer.
+            await self._fill_typeahead(
+                page, ["#location-input", "input[name='location']"], COMMON_ANSWERS["city"],
+            )
+            await self._set_first(
+                page, ["input[name='org']"], COMMON_ANSWERS["current_company"],
+            )
             await self._set_first(
                 page, ["input[name='urls[LinkedIn]']", "input[name='urls[LinkedIn URL]']"],
                 COMMON_ANSWERS["linkedin"],
@@ -992,8 +1169,7 @@ class AutoApplicant:
             await self._fill_labeled_questions(page, cover_letter, job)
             await self._fill_selects(page)
             await self._fill_comboboxes(page, job)
-            await self._fill_radios(page)
-            await self._check_required_boxes(page)
+            await self._fill_choice_groups(page)
             return await self._submit_and_confirm(
                 page, job, "lever",
                 submit_selectors=["button[type='submit']", "button:has-text('Submit application')", "#btn-submit"],
@@ -1040,8 +1216,7 @@ class AutoApplicant:
             await self._fill_labeled_questions(page, cover_letter, job)
             await self._fill_selects(page)
             await self._fill_comboboxes(page, job)
-            await self._fill_radios(page)
-            await self._check_required_boxes(page)
+            await self._fill_choice_groups(page)
             return await self._submit_and_confirm(
                 page, job, "ashby",
                 submit_selectors=[

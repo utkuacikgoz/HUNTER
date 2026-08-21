@@ -202,45 +202,136 @@ class TestSelectTarget:
         assert self.app._select_target("Favourite colour") is None
 
 
-class FakeRadioPage:
+class FakeChoicePage:
+    """Page stand-in for the radio/checkbox pass."""
     def __init__(self, groups):
         self._groups = groups
         self.clicked = []
 
-    async def evaluate(self, script):
+    async def evaluate(self, script, *args):
         return self._groups
 
-    async def click(self, sel):
+    async def click(self, sel, **kwargs):
         self.clicked.append(sel)
 
+    async def query_selector(self, sel):
+        return None
 
-class TestFillRadios:
-    """Ashby uses radio groups for visa/EEO questions — pick the right option."""
 
-    async def test_picks_correct_radio_per_question(self):
+class TestChoiceGroups:
+    """Radios (Ashby) and checkbox groups (Lever cards) are the same mechanism:
+    a single-select that must get exactly one answer."""
+
+    def _page(self, groups):
+        return FakeChoicePage(groups)
+
+    def _group(self, question, options, kind="radio", required=True, checked=False):
+        return {"question": question, "kind": kind, "required": required,
+                "checked": checked,
+                "options": [{"id": i, "name": "g", "value": lab, "label": lab}
+                            for i, lab in options]}
+
+    async def test_picks_correct_option_per_question(self):
         app = AutoApplicant()
-        groups = {
-            "g1": {"question": "Will you require visa sponsorship?",
-                   "options": [{"id": "y1", "label": "Yes"}, {"id": "n1", "label": "No"}]},
-            "g2": {"question": "Are you authorized to work without sponsorship?",
-                   "options": [{"id": "y2", "label": "Yes"}, {"id": "n2", "label": "No"}]},
-            "g3": {"question": "Gender",
-                   "options": [{"id": "m", "label": "Male"},
-                               {"id": "d", "label": "Decline to self-identify"}]},
-        }
-        page = FakeRadioPage(groups)
-        await app._fill_radios(page)
-        assert 'label[for="y1"]' in page.clicked   # sponsorship -> Yes
+        page = self._page({
+            "g1": self._group("Will you require visa sponsorship?", [("y1", "Yes"), ("n1", "No")]),
+            "g2": self._group("Are you authorized to work without sponsorship?",
+                              [("y2", "Yes"), ("n2", "No")]),
+            "g3": self._group("Gender", [("m", "Male"), ("d", "Decline to self-identify")]),
+        })
+        await app._fill_choice_groups(page)
+        assert 'label[for="y1"]' in page.clicked    # sponsorship -> Yes
         assert 'label[for="n2"]' in page.clicked    # authorized-without-sponsorship -> No
         assert 'label[for="d"]' in page.clicked     # gender -> Decline
-        assert 'label[for="y2"]' not in page.clicked  # didn't wrongly pick Yes for auth
+        assert 'label[for="y2"]' not in page.clicked
 
-    async def test_unknown_question_skipped(self):
+    async def test_checkbox_group_gets_exactly_one_answer(self, monkeypatch):
+        # Lever renders a single-select question as several required checkboxes
+        # sharing a name. Ticking every required box would answer "No" AND "Yes".
+        monkeypatch.setattr(engine_mod, "choose_dropdown_option", lambda q, o: 0)
         app = AutoApplicant()
-        page = FakeRadioPage({"g": {"question": "Pineapple on pizza?",
-                                    "options": [{"id": "y", "label": "Yes"}]}})
-        await app._fill_radios(page)
+        page = self._page({
+            "cards[x][field0]": self._group(
+                "Have you previously worked here?",
+                [("a", "No"), ("b", "Yes - Intern"), ("c", "Yes - Full Time")],
+                kind="checkbox",
+            ),
+        })
+        await app._fill_choice_groups(page)
+        assert len(page.clicked) == 1
+
+    async def test_lone_required_checkbox_is_consent(self):
+        app = AutoApplicant()
+        page = self._page({
+            "consent": self._group("I consent to my data being stored",
+                                   [("c1", "I agree")], kind="checkbox"),
+        })
+        consented = await app._fill_choice_groups(page)
+        assert consented == ["I consent to my data being stored"]
+        assert page.clicked == ['label[for="c1"]']
+
+    async def test_optional_checkbox_is_left_alone(self):
+        # Marketing opt-ins are not required and must never be ticked for the user.
+        app = AutoApplicant()
+        page = self._page({
+            "marketing": self._group("Contact me about future opportunities",
+                                     [("m1", "Yes please")], kind="checkbox", required=False),
+        })
+        assert await app._fill_choice_groups(page) == []
         assert page.clicked == []
+
+    async def test_already_answered_group_is_skipped(self):
+        app = AutoApplicant()
+        page = self._page({
+            "g": self._group("Will you require visa sponsorship?", [("y", "Yes"), ("n", "No")],
+                             checked=True),
+        })
+        await app._fill_choice_groups(page)
+        assert page.clicked == []
+
+    async def test_demographic_question_never_reaches_the_model(self, monkeypatch):
+        def boom(question, options):
+            raise AssertionError("demographic questions must not be sent to the model")
+
+        monkeypatch.setattr(engine_mod, "choose_dropdown_option", boom)
+        app = AutoApplicant()
+        # No decline-style option offered -> leave it blank rather than guess.
+        page = self._page({"g": self._group("What is your race/ethnicity?",
+                                            [("a", "Asian"), ("b", "White")])})
+        await app._fill_choice_groups(page)
+        assert page.clicked == []
+
+    async def test_unknown_question_falls_back_to_the_model(self, monkeypatch):
+        asked = {}
+
+        def fake_choice(question, options):
+            asked["q"] = question
+            return options.index("Yes - Intern")
+
+        monkeypatch.setattr(engine_mod, "choose_dropdown_option", fake_choice)
+        app = AutoApplicant()
+        page = self._page({"g": self._group("Have you ever been employed by us?",
+                                            [("a", "No"), ("b", "Yes - Intern")])})
+        await app._fill_choice_groups(page)
+        assert asked["q"] == "Have you ever been employed by us?"
+        assert page.clicked == ['label[for="b"]']
+
+
+class TestMatchOption:
+    def test_consent_never_picks_a_negated_option(self):
+        app = AutoApplicant()
+        options = ["I do not consent", "I consent to the above", "Withdraw consent"]
+        assert app._match_option("consent", options) == 1
+
+    def test_decline_matches_real_world_phrasings(self):
+        app = AutoApplicant()
+        for phrasing in ("I do not want to answer", "Prefer not to say",
+                         "Decline To Self Identify", "I choose not to disclose"):
+            assert app._match_option("decline", ["Male", phrasing]) == 1, phrasing
+
+    def test_no_match_returns_none(self):
+        app = AutoApplicant()
+        assert app._match_option("yes", ["Maybe", "Unsure"]) is None
 
 
 class TestApplyCap:
@@ -326,3 +417,53 @@ class TestEventLoopIsNotBlocked:
 
         assert result.method == "manual_handoff"
         assert ticks >= 5, f"event loop was blocked during generation (only {ticks} ticks)"
+
+
+class TestUnconfirmedSubmitGuard:
+    """A submit we couldn't confirm must never be retried automatically —
+    the application may well have landed, and a duplicate is worse than none."""
+
+    async def test_previous_unconfirmed_submit_blocks_reapply(self, monkeypatch):
+        monkeypatch.setattr(engine_mod, "get_job_by_id", lambda job_id: {"status": "approved"})
+        monkeypatch.setattr(engine_mod, "has_unconfirmed_submit", lambda job_id: True)
+        called = {"cover_letter": False}
+
+        def fake_cover(*a, **k):
+            called["cover_letter"] = True
+            return "CL"
+
+        monkeypatch.setattr(engine_mod, "generate_cover_letter", fake_cover)
+
+        result = await AutoApplicant().apply_to_job(
+            {"id": 5, "title": "PM", "company": "Acme",
+             "url": "https://x/y", "platform": "greenhouse"}
+        )
+        assert result.success is False
+        assert result.method == "manual_handoff"
+        assert "couldn't confirm" in result.message
+        # Bailed before doing any work at all.
+        assert called["cover_letter"] is False
+
+    async def test_unconfirmed_result_is_logged_under_its_own_action(self, monkeypatch):
+        logged = []
+        monkeypatch.setattr(engine_mod, "get_job_by_id", lambda job_id: None)
+        monkeypatch.setattr(engine_mod, "has_unconfirmed_submit", lambda job_id: False)
+        monkeypatch.setattr(engine_mod, "set_cover_letter", lambda *a: None)
+        monkeypatch.setattr(engine_mod, "generate_cover_letter", lambda *a, **k: "CL")
+        monkeypatch.setattr(engine_mod, "log_action",
+                            lambda job_id, action, detail="": logged.append(action))
+
+        async def fake_greenhouse(job, cover_letter):
+            return engine_mod.ApplyResult(
+                success=False, method="submitted_unconfirmed", message="no confirmation",
+            )
+
+        app = AutoApplicant()
+        monkeypatch.setattr(app, "_apply_greenhouse", fake_greenhouse)
+        result = await app.apply_to_job(
+            {"id": 6, "title": "PM", "company": "Acme",
+             "url": "https://x/y", "platform": "greenhouse"}
+        )
+        assert result.method == "submitted_unconfirmed"
+        # Not "apply_failed": has_unconfirmed_submit() looks for this exact action.
+        assert "apply_submitted_unconfirmed" in logged

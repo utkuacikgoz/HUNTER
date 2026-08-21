@@ -324,6 +324,12 @@ COMMON_ANSWERS = {
     "requires_sponsorship": os.getenv("ANSWER_REQUIRES_SPONSORSHIP", "yes"),
     "work_authorized": os.getenv("ANSWER_WORK_AUTHORIZED", "no"),
     "location": os.getenv("ANSWER_LOCATION", "Istanbul, Turkey"),
+    # Lever (and some Ashby boards) require current employer / title as their own
+    # fields. Left empty by default: inventing an employer on an application is
+    # never acceptable, so an unset value makes the apply stop and hand off to a
+    # manual apply rather than submit something untrue.
+    "current_company": os.getenv("ANSWER_CURRENT_COMPANY", ""),
+    "current_title": os.getenv("ANSWER_CURRENT_TITLE", ""),
     # Split city/country: ATS location dropdowns ask for them separately, and a
     # combined string matches no option.
     "city": os.getenv("ANSWER_CITY", "Istanbul"),

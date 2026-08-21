@@ -48,7 +48,17 @@ Pipeline: **scrape → filter/classify → store → Telegram review → apply �
   (each overridable via env): `COVER_LETTER_MODEL` (strongest — low-volume, represents you to
   employers), `CLAUDE_MODEL` (form answers), `SPONSOR_MODEL` (cheap yes/no classifier run on most
   flagged jobs every hunt). Falls back to a template if `ANTHROPIC_API_KEY` is unset.
-- [applicant/engine.py](applicant/engine.py) — Playwright auto-apply engine.
+- [applicant/engine.py](applicant/engine.py) — Playwright auto-apply engine. Fills text
+  fields from `COMMON_ANSWERS`, free-text questions from the LLM, and dropdowns in three
+  passes: native `<select>`, react-select comboboxes (what current Greenhouse forms use —
+  there is no `<select>` on them at all), and radio/checkbox groups. Each dropdown is
+  answered by rule first (`_select_target`) and by `choose_dropdown_option` second, which
+  picks from the option list actually on the page. Demographic questions resolve to
+  "decline" by rule and are never sent to the model. Before submitting it checks
+  `_missing_required_fields`: an incomplete form is never submitted, it's handed back as a
+  manual apply naming the unanswered questions. A submit that isn't confirmed is recorded
+  as `apply_submitted_unconfirmed` and never retried automatically (a duplicate application
+  is worse than none).
 - [telegram_bot/bot.py](telegram_bot/bot.py) — Telegram review UI and apply worker queue.
 - [tests/](tests/) — pytest suite (asyncio auto mode).
 
