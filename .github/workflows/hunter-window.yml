@@ -23,10 +23,14 @@ name: HUNTER active window
 # UTC) so a missed stop only costs ~1 extra hour, not a whole night.
 
 on:
-  schedule:
-    - cron: '0 10-20 * * *'   # hourly 10:00–20:00 UTC -> ensure STARTED (unless paused)
-    - cron: '0 21,22 * * *'   # 21:00 & 22:00 UTC -> STOP (backstopped)
-    - cron: '0 9 * * 1'       # Mon 09:00 UTC (12:00 Istanbul) -> weekly pause reminder
+  # Schedules disabled: the Fly app this workflow drives (hunter-whjqdw) has been
+  # deleted, so every run would fail on `flyctl machines list` against an app that
+  # no longer exists — hourly, and now loudly, since the notification steps report
+  # their own failures. Re-enable these three lines once the app is recreated.
+  # schedule:
+  #   - cron: '0 10-20 * * *'   # hourly 10:00–20:00 UTC -> ensure STARTED (unless paused)
+  #   - cron: '0 21,22 * * *'   # 21:00 & 22:00 UTC -> STOP (backstopped)
+  #   - cron: '0 9 * * 1'       # Mon 09:00 UTC (12:00 Istanbul) -> weekly pause reminder
   workflow_dispatch:
     inputs:
       action:
