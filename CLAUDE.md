@@ -162,8 +162,10 @@ After bumping `requirements.txt`, regenerate the lock:
 - New job sources subclass `ApiSource` (preferred, no browser) or `BrowserSource`.
 - External/untrusted text (job descriptions) is sanitized before going into LLM prompts —
   see `_sanitize_external_text` in [prompts/generator.py](prompts/generator.py).
-- **No Claude attribution.** Do not add `Co-Authored-By: Claude` trailers to commits or
-  "Generated with Claude Code" to PR bodies.
+- **No AI attribution.** Commits are authored by the repository owner, and nothing
+  in git may say otherwise. No `Co-Authored-By: Claude`/`Codex` trailer, no
+  `Claude-Session:` trailer, no "Generated with Claude Code" line in a commit or PR
+  body, and no `claude/…` or `codex/…` branch name.
 
 ## Planning docs
 
