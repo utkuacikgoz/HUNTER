@@ -37,6 +37,7 @@ from config.settings import (
     SEARCH_QUERIES,
     SOURCE_FETCH_CAP,
     TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
     VELOCITY_BOOST_RANK,
     VELOCITY_HOT_THRESHOLD,
     VELOCITY_WINDOW_DAYS,
@@ -288,11 +289,15 @@ async def hunt():
     )
 
     pending = _rank_pending_by_velocity(velocity)
-    if pending:
+    if not pending:
+        logger.info("No new jobs to send")
+    elif TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
         logger.info(f"📱 Sending {len(pending)} jobs to Telegram...")
         await send_jobs_batch(pending)
     else:
-        logger.info("No new jobs to send")
+        # No Telegram configured — print the list instead so a credential-free
+        # local run still delivers the feed.
+        print_job_list(pending)
 
     return {"scraped": len(all_jobs), "new": new_count, "sent_to_telegram": len(pending)}
 
@@ -321,6 +326,34 @@ async def apply():
     # Send stats after applying
     await send_stats_message()
     return results
+
+
+def print_job_list(jobs: list[dict]) -> None:
+    """Print reviewable jobs grouped by company. ⚠️ marks a flag verdict — the
+    remote scope wasn't explicit, so check the posting before applying."""
+    by_company: dict[str, list[dict]] = {}
+    for j in jobs:
+        company = (j.get("company") or "").strip() or "(unknown company)"
+        by_company.setdefault(company, []).append(j)
+    print(f"\n📋 {len(jobs)} open role(s) across {len(by_company)} companies:\n")
+    for company in sorted(by_company, key=str.lower):
+        print(company)
+        for j in by_company[company]:
+            loc = (j.get("location") or "").strip()
+            flag = "  ⚠️ check remote scope" if j.get("filter_verdict") == "flag" else ""
+            print(f"  • {j.get('title', '')}" + (f" — {loc}" if loc else "") + flag)
+            if j.get("url"):
+                print(f"    {j['url']}")
+        print()
+
+
+async def list_jobs():
+    """List stored reviewable jobs (include/flag) — DB-only, no credentials needed."""
+    pending = get_pending_jobs(limit=200)
+    if not pending:
+        print("No open roles in the queue. Run `python main.py hunt` first.")
+        return
+    print_job_list(pending)
 
 
 async def followup():
@@ -690,7 +723,8 @@ def main():
 HUNTER - Job Hunting Automation
 
 Usage:
-  python main.py hunt       - Scrape jobs and send to Telegram
+  python main.py hunt       - Scrape jobs; send to Telegram (or print, if unconfigured)
+  python main.py list       - List stored open roles by company (no credentials needed)
   python main.py apply      - Apply to all approved jobs
   python main.py followup   - Send follow-up reminders
   python main.py stats      - Show statistics
@@ -710,6 +744,7 @@ Usage:
 
     commands = {
         "hunt": hunt,
+        "list": list_jobs,
         "apply": apply,
         "followup": followup,
         "stats": stats,
@@ -719,7 +754,7 @@ Usage:
 
     if command not in commands:
         print(f"Unknown command: {command}")
-        print("Available: hunt, apply, followup, stats, bot, bot-all, backup")
+        print("Available: hunt, list, apply, followup, stats, bot, bot-all, backup")
         return
 
     # Validate config before running

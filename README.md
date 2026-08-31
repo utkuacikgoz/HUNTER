@@ -1,14 +1,17 @@
 # HUNTER
 
-Personal job-hunting automation for Product Manager roles (Python 3.12, asyncio).
+Personal job-hunting automation for Product Manager roles (Python 3.13, asyncio).
 
-HUNTER scrapes PM postings from several sources, filters them by region /
-remote / visa-sponsor signals, pushes candidates to a Telegram bot for human
-review, then (optionally) auto-applies to approved jobs with Playwright and
-Claude-generated cover letters. All state lives in a local SQLite database.
+HUNTER lists the jobs and companies hiring **Head of Product / Senior Product
+Manager, remote only**, that a Turkey-based candidate with no US/EU/UK work
+permit can actually take: remote roles locked to US/Canada, the EU, or the UK
+are dropped; worldwide/EMEA/Turkey scopes are kept. Results print to the
+terminal (`list`, or `hunt` without credentials) or go to a Telegram bot for
+review, with an optional Playwright auto-apply path behind Telegram approval.
+All state lives in a local SQLite database.
 
 ```
-scrape → filter/classify → store → Telegram review → apply → track/follow-up
+scrape → filter/classify → store → list / Telegram review → apply → track/follow-up
 ```
 
 ## Features
@@ -33,7 +36,8 @@ python3 -m venv .venv
 
 cp .env.example .env                          # then fill in your values
 .venv/bin/python main.py stats               # DB-only, safe smoke test
-.venv/bin/python main.py hunt                # scrape + push to Telegram (needs creds)
+.venv/bin/python main.py hunt                # scrape + filter; prints list if no Telegram creds
+.venv/bin/python main.py list                # print stored open roles by company (no creds)
 ```
 
 ## Commands
@@ -42,14 +46,15 @@ cp .env.example .env                          # then fill in your values
 
 | Command    | What it does                                                            |
 | ---------- | ----------------------------------------------------------------------- |
-| `hunt`     | Scrape all sources, filter, and push candidates to Telegram             |
+| `hunt`     | Scrape all sources, filter, store; send to Telegram, or print if no creds |
+| `list`     | Print stored open roles grouped by company (no credentials required)    |
 | `apply`    | Auto-apply to approved jobs                                             |
 | `followup` | Send follow-ups on applied jobs                                         |
 | `stats`    | Print DB stats (no credentials required)                                |
 | `bot`      | Run the Telegram bot + APScheduler cron (daily hunt, follow-up, backup) |
 | `backup`   | Back up the SQLite DB                                                   |
 
-`stats`, `backup`, and `followup` need no credentials — use them to smoke-test.
+`list`, `stats`, `backup`, and `followup` need no credentials — use them to smoke-test.
 
 ## Configuration
 

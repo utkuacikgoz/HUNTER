@@ -1,13 +1,20 @@
-"""Post-scrape filter: classify jobs by region, remote, and sponsor-friendliness.
+"""Post-scrape filter: keep remote roles the candidate can actually take.
+
+The candidate works remotely from Turkey and holds no US/EU/UK work permit, so a
+remote role locked to one of those regions ("Remote - US", "Remote (EU)",
+"Remote - Germany") is as unusable as an on-site one. Eligible scopes are the
+ones that include Turkey: worldwide/global, EMEA, MENA, or Turkey itself.
 
 Verdicts:
-- include: confidently a fit (remote + allowed region + sponsor-friendly)
-- flag:    plausible fit but at least one unknown signal (yellow flag in Telegram)
-- drop:    clearly disqualified (US-only language, wrong region, on-site, blocklisted)
+- include: confidently a fit (remote + explicitly open to the candidate's scope,
+           or a sponsor-friendly company)
+- flag:    plausible fit but scope unknown (bare "Remote") — yellow flag for review
+- drop:    clearly disqualified (region-locked remote, US-only language, on-site,
+           blocklisted)
 
 ALLOW_ONSITE_FREELANCE exempts freelance/contract roles from the on-site drop, turning
-the feed into "remote OR freelance". Only that gate is exempted — region, country-lock
-and sponsor checks still apply.
+the feed into "remote OR freelance". Only that gate is exempted — region, lock and
+sponsor checks still apply.
 """
 from __future__ import annotations
 
@@ -19,7 +26,6 @@ from typing import Literal
 
 from config.settings import (
     ALLOW_ONSITE_FREELANCE,
-    CANDIDATE_WORK_REGIONS,
     REGION_ALLOWLIST,
     REMOTE_REQUIRED,
     SPONSOR_BLOCKLIST_COMPANIES,
@@ -90,6 +96,16 @@ _TITLE_US_LOCK_TOKENS = {
 # Tokens that signal a remote role is open beyond a single country — so a US/Canada
 # mention alongside one of these is NOT a residence lock.
 _GLOBAL_REMOTE_TOKENS = {"worldwide", "anywhere", "global", "globally", "any country", "any location"}
+# Remote scopes that include Turkey — the candidate can take these without any
+# foreign work permit. (Kept separate from _EMEA_TOKENS: that set also carries
+# UK/EU-adjacent tokens used only for coarse region classification.)
+_ELIGIBLE_SCOPE_TOKENS = {
+    "emea", "mena", "middle east", "africa",
+    "turkey", "turkiye", "istanbul", "ankara", "izmir",
+}
+# Single-jurisdiction scopes the candidate can NOT satisfy (no UK permit). UK sits
+# inside _EMEA_TOKENS for classification, so the lock check needs its own set.
+_UK_LOCK_TOKENS = {"uk", "united kingdom", "britain", "england", "scotland", "london"}
 
 # Employment-type tokens, split by noise the same way _US_TOKENS / _US_LOC_ONLY are.
 # These phrases can only mean an employment type, so they're matched across
@@ -130,17 +146,25 @@ def _normalize(text: str | None) -> str:
 def _has(normalized: str, tokens: set[str]) -> bool:
     return any(f" {tok} " in normalized for tok in tokens)
 
-_US_ONLY_BLOCKERS = re.compile(
+# Residency requirements — always disqualifying (the candidate is in Turkey).
+_US_RESIDENCY_BLOCKERS = re.compile(
     r"(?i)("
     r"u\.?s\.? citizens?\s+only"
     r"|must be (located|based) in the (u\.?s\.?|united states)"
     r"|work authorization in the u\.?s\.?\s+required"
     r"|authorized to work in the (u\.?s\.?|united states)\s+(without|with no) sponsorship"
-    r"|no visa sponsorship"
-    r"|sponsorship (is )?not (available|provided|offered)"
-    r"|unable to (provide|offer) (visa )?sponsorship"
     r"|green card holders? only"
     r"|u\.?s\.?-only"
+    r")"
+)
+# "We don't sponsor visas" — disqualifying only when the role isn't explicitly
+# open to the candidate's remote scope: a worldwide/EMEA-remote role needs no
+# visa at all, so this language is noise there.
+_NO_SPONSORSHIP_BLOCKERS = re.compile(
+    r"(?i)("
+    r"no visa sponsorship"
+    r"|sponsorship (is )?not (available|provided|offered)"
+    r"|unable to (provide|offer) (visa )?sponsorship"
     r")"
 )
 
@@ -152,11 +176,22 @@ def _haystack(job: dict, *, include_description: bool = True) -> str:
     return " ".join(parts).lower()
 
 
-def detect_us_only_blocker(job: dict) -> str | None:
-    """Return the matched phrase, or None."""
+def detect_us_only_blocker(job: dict, *, ignore_sponsorship: bool = False) -> str | None:
+    """Return the matched disqualifying phrase, or None.
+
+    `ignore_sponsorship=True` skips the no-visa-sponsorship phrases (used for
+    roles explicitly open to the candidate's remote scope, where no visa is
+    needed); residency requirements always match.
+    """
     text = job.get("description") or ""
-    m = _US_ONLY_BLOCKERS.search(text)
-    return m.group(0) if m else None
+    m = _US_RESIDENCY_BLOCKERS.search(text)
+    if m:
+        return m.group(0)
+    if not ignore_sponsorship:
+        m = _NO_SPONSORSHIP_BLOCKERS.search(text)
+        if m:
+            return m.group(0)
+    return None
 
 
 def detect_remote(job: dict) -> bool:
@@ -193,13 +228,20 @@ def detect_freelance(job: dict) -> bool:
     return _has(full, _FREELANCE_TOKENS)
 
 
-def detect_country_locked_remote(job: dict) -> str | None:
-    """A remote role whose *location* is restricted to the US and/or Canada, with
-    no EU/EMEA or global scope. Such roles require residence / work authorization
-    there, so they won't accept an overseas (EMEA-based) candidate — even at a
-    sponsor-friendly company.
+def detect_eligible_remote_scope(job: dict) -> bool:
+    """True when the structured location explicitly opens the role to the
+    candidate: worldwide/global, or a Turkey-inclusive scope (EMEA/MENA/Turkey)."""
+    nloc = _normalize(job.get("location"))
+    return _has(nloc, _GLOBAL_REMOTE_TOKENS) or _has(nloc, _ELIGIBLE_SCOPE_TOKENS)
 
-    Returns the location text when locked, else None. Checks the structured
+
+def detect_ineligible_remote_lock(job: dict) -> str | None:
+    """A remote role whose *location* is restricted to a jurisdiction the
+    candidate can't work from — US/Canada, EU, or UK — with no Turkey-inclusive
+    or global scope. Such roles require residence / work authorization there, so
+    they won't accept a Turkey-based candidate even at a sponsor-friendly company.
+
+    Returns the locked location (or title) text, else None. Checks the structured
     location field plus explicit US-lock markers in the title ("US-Based"); other
     description prose ("our US team") is too noisy.
     """
@@ -210,21 +252,24 @@ def detect_country_locked_remote(job: dict) -> str | None:
         return (job.get("title") or "").strip()
     nloc = _normalize(job.get("location"))
     # A structured is_remote flag (Ashby/Lever/Greenhouse) counts as a remote signal even
-    # when the location text is bare US cities with no literal "remote" word (e.g.
-    # "San Francisco, CA • New York, NY • United States") — those US-remote roles still
-    # won't take an overseas hire.
+    # when the location text is bare cities with no literal "remote" word (e.g.
+    # "San Francisco, CA • New York, NY • United States") — those region-locked
+    # remote roles still won't take a Turkey-based hire.
     if not (detect_remote(job) or _has(nloc, _REMOTE_TOKENS)):
         return None
-    locked_to_us_ca = (
+    # Explicitly global or Turkey-inclusive → not a lock, whatever else is listed
+    # ("Remote - US, UK, EMEA" is takeable via the EMEA scope).
+    if detect_eligible_remote_scope(job):
+        return None
+    locked = (
         _has(nloc, _US_TOKENS)
         or _has(nloc, _US_LOC_ONLY)
         or _has(nloc, _US_STATE_HINTS)
         or _has(nloc, _CANADA_TOKENS)
+        or _has(nloc, _EU_TOKENS)
+        or _has(nloc, _UK_LOCK_TOKENS)
     )
-    if not locked_to_us_ca:
-        return None
-    # Also opens to the candidate's regions or is explicitly global → not a lock.
-    if _has(nloc, _GLOBAL_REMOTE_TOKENS) or _has(nloc, _EU_TOKENS) or _has(nloc, _EMEA_TOKENS):
+    if not locked:
         return None
     return (job.get("location") or "").strip()
 
@@ -310,12 +355,16 @@ def _evaluate_sync(job: dict) -> JobVerdict:
     # Computed once and carried onto every verdict, including the hard drops, so the
     # stored column stays answerable ("which freelance roles did we drop, and why?").
     is_freelance = detect_freelance(job)
+    is_remote = detect_remote(job)
+    # Explicitly worldwide / EMEA / Turkey remote — no visa needed, so
+    # no-sponsorship language in the JD is noise for these.
+    eligible_scope = is_remote and detect_eligible_remote_scope(job)
 
-    blocker = detect_us_only_blocker(job)
+    blocker = detect_us_only_blocker(job, ignore_sponsorship=eligible_scope)
     if blocker:
         return JobVerdict(
             region="us",
-            is_remote=detect_remote(job),
+            is_remote=is_remote,
             is_freelance=is_freelance,
             sponsor_status="blocklist",
             verdict="drop",
@@ -326,14 +375,13 @@ def _evaluate_sync(job: dict) -> JobVerdict:
     if sponsor == "blocklist":
         return JobVerdict(
             region=classify_region(job),
-            is_remote=detect_remote(job),
+            is_remote=is_remote,
             is_freelance=is_freelance,
             sponsor_status="blocklist",
             verdict="drop",
             reasons=[f"company in blocklist: {job.get('company')!r}"],
         )
 
-    is_remote = detect_remote(job)
     if REMOTE_REQUIRED and not is_remote:
         if not (ALLOW_ONSITE_FREELANCE and is_freelance):
             return JobVerdict(
@@ -350,11 +398,12 @@ def _evaluate_sync(job: dict) -> JobVerdict:
             )
         reasons.append("on-site but freelance/contract — allowed")
 
-    # Remote role locked to US/Canada (where the candidate can't work) -> drop.
-    # Takes precedence over the sponsor allowlist: a US-locked posting won't take
-    # an overseas candidate regardless of how visa-friendly the company is.
-    if is_remote and CANDIDATE_WORK_REGIONS and "us" not in CANDIDATE_WORK_REGIONS:
-        locked = detect_country_locked_remote(job)
+    # Remote role locked to a jurisdiction the candidate can't work from
+    # (US/Canada, EU, UK) -> drop. Takes precedence over the sponsor allowlist: a
+    # region-locked posting won't take a Turkey-based candidate regardless of how
+    # visa-friendly the company is.
+    if is_remote:
+        locked = detect_ineligible_remote_lock(job)
         if locked:
             return JobVerdict(
                 region=classify_region(job),
@@ -362,7 +411,7 @@ def _evaluate_sync(job: dict) -> JobVerdict:
                 is_freelance=is_freelance,
                 sponsor_status=sponsor,
                 verdict="drop",
-                reasons=[f"remote locked to US/Canada (candidate is overseas): {locked!r}"],
+                reasons=[f"remote locked to region candidate can't work from: {locked!r}"],
             )
 
     region = classify_region(job)
@@ -385,6 +434,19 @@ def _evaluate_sync(job: dict) -> JobVerdict:
             reasons=[f"region {region} not in REGION_ALLOWLIST"],
         )
 
+    # Explicitly open to the candidate's remote scope → confident include, no
+    # sponsor signal needed (remote-from-Turkey work needs no visa).
+    if eligible_scope:
+        reasons.append("remote scope open to candidate (global/EMEA/Turkey)")
+        return JobVerdict(
+            region=region,
+            is_remote=is_remote,
+            is_freelance=is_freelance,
+            sponsor_status=sponsor,
+            verdict="include",
+            reasons=reasons,
+        )
+
     if sponsor == "allowlist":
         if region == "unknown":
             reasons.append("unknown region but sponsor-friendly company")
@@ -397,8 +459,8 @@ def _evaluate_sync(job: dict) -> JobVerdict:
             reasons=reasons or ["allowlist match"],
         )
 
-    # Unknown sponsor + good region/remote -> flag for human review.
-    reasons.append("unknown sponsor — needs review")
+    # Remote but scope not explicit (bare "Remote") -> flag for human review.
+    reasons.append("remote scope not explicit — needs review")
     if region == "unknown":
         reasons.append("region not detected from text")
     return JobVerdict(

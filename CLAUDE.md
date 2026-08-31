@@ -18,18 +18,22 @@ Default to caveman. Short. No filler.
 
 ## What HUNTER is
 
-A personal job-hunting automation tool (Python 3.13, asyncio). It scrapes Product
-Manager roles from several sources, filters them by region / remote / visa-sponsor
-signals, pushes candidates to a Telegram bot for human review, then auto-applies to
-approved jobs with Playwright and Claude-generated cover letters. State lives in a
-local SQLite DB.
+A personal job-hunting automation tool (Python 3.13, asyncio). The brief: list the
+jobs and companies hiring **Head of Product / Senior Product Manager, remote only**,
+that a Turkish citizen with no US/EU/UK work permit can actually take. A remote role
+locked to US/Canada, the EU, or the UK ("Remote - US", "Remote (EU)", "Remote -
+Germany") is dropped; worldwide/EMEA/Turkey scopes are kept; bare "Remote" is
+flagged for review. It scrapes several sources, filters, stores to a local SQLite
+DB, and either prints the list (`list`, or credential-free `hunt`) or pushes to a
+Telegram bot for review; the Playwright auto-apply path is still there behind
+Telegram approval.
 
-Pipeline: **scrape → filter/classify → store → Telegram review → apply → track/follow-up**
+Pipeline: **scrape → filter/classify → store → list / Telegram review → apply → track/follow-up**
 
 ## Layout
 
-- [main.py](main.py) — CLI entry point and orchestrator. Subcommands: `hunt`, `apply`,
-  `followup`, `stats`, `bot`, `backup`. `bot` runs the Telegram bot plus an APScheduler
+- [main.py](main.py) — CLI entry point and orchestrator. Subcommands: `hunt`, `list`,
+  `apply`, `followup`, `stats`, `bot`, `backup`. `bot` runs the Telegram bot plus an APScheduler
   cron (daily hunt, follow-up, DB backup, screenshot prune) with graceful shutdown.
 - [config/settings.py](config/settings.py) — **all configuration**, read from env via
   `python-dotenv`. Also `validate_config(command)` which gates each subcommand on its
@@ -92,11 +96,13 @@ Required vars by command (from `validate_config`):
 
 | Command | Hard requirement | Warns if missing |
 |---|---|---|
-| `hunt`, `bot`, `review` | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | `LINKEDIN_SESSION_COOKIE` |
+| `bot` | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | `LINKEDIN_SESSION_COOKIE` |
+| `hunt` | none — without Telegram creds it prints the list instead of sending | Telegram creds, `LINKEDIN_SESSION_COOKIE` |
 | `apply`, `bot` | `config/resume.txt` or `RESUME_TEXT` | `ANTHROPIC_API_KEY`, `LINKEDIN_SESSION_COOKIE` |
-| `stats`, `backup`, `followup` | none (DB-only / local) | — |
+| `list`, `stats`, `backup`, `followup` | none (DB-only / local) | — |
 
-`stats`, `backup`, and `followup` run with no credentials, so use them to smoke-test.
+`list`, `stats`, `backup`, and `followup` run with no credentials, so use them to
+smoke-test; `hunt` needs only network.
 Resume text is read from `config/resume.txt` (preferred) or the `RESUME_TEXT` env var.
 
 ### Profiles (running more than one bot from one checkout)
@@ -132,13 +138,14 @@ python3 -m venv .venv
 .venv/bin/playwright install chromium        # needed for scrape/apply paths
 
 .venv/bin/python main.py stats               # DB-only, safe smoke test
-.venv/bin/python main.py hunt                # scrape + push to Telegram (needs creds)
+.venv/bin/python main.py hunt                # scrape + filter; prints list if no Telegram creds
+.venv/bin/python main.py list                # print stored open roles by company (no creds)
 ```
 
 Quality gates (mirror CI in [.github/workflows/ci.yml](.github/workflows/ci.yml)):
 
 ```bash
-.venv/bin/python -m pytest -q     # 341 tests
+.venv/bin/python -m pytest -q     # 395 tests
 .venv/bin/ruff check .            # lint
 .venv/bin/mypy                    # type check (files configured in pyproject.toml)
 ```

@@ -30,7 +30,7 @@ async def test_hunt_classifies_persists_and_dispatches(temp_db, monkeypatch):
         {
             "title": "Senior Product Manager",
             "company": "Stripe",  # default sponsor allowlist -> include
-            "location": "Remote, Europe",
+            "location": "Remote - EMEA",
             "salary": "$120k",
             "url": "https://example.com/stripe-pm",
             "platform": "remoteok",
@@ -57,6 +57,9 @@ async def test_hunt_classifies_persists_and_dispatches(temp_db, monkeypatch):
 
     monkeypatch.setattr(main, "_scrape_all", fake_scrape_all)
     monkeypatch.setattr(main, "send_jobs_batch", fake_send_jobs_batch)
+    # hunt() only dispatches to Telegram when credentials are configured.
+    monkeypatch.setattr(main, "TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setattr(main, "TELEGRAM_CHAT_ID", "chat")
 
     result = await main.hunt()
 
@@ -93,7 +96,7 @@ async def test_drops_do_not_consume_review_budget(temp_db, monkeypatch):
     ] + [
         {
             "title": "Senior Product Manager", "company": "Stripe",
-            "location": "Remote, Europe", "salary": "",
+            "location": "Remote - EMEA", "salary": "",
             "url": f"https://example.com/keep-{i}", "platform": "remoteok",
             "description": "EU remote role.",
         }
@@ -110,6 +113,8 @@ async def test_drops_do_not_consume_review_budget(temp_db, monkeypatch):
 
     monkeypatch.setattr(main, "_scrape_all", fake_scrape_all)
     monkeypatch.setattr(main, "send_jobs_batch", fake_send_jobs_batch)
+    monkeypatch.setattr(main, "TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setattr(main, "TELEGRAM_CHAT_ID", "chat")
 
     result = await main.hunt()
 
@@ -117,6 +122,55 @@ async def test_drops_do_not_consume_review_budget(temp_db, monkeypatch):
     assert result["new"] == 7
     assert result["sent_to_telegram"] == 2
     assert {j["title"] for j in captured["pending"]} == {"Senior Product Manager"}
+
+
+async def test_hunt_without_telegram_prints_list(temp_db, monkeypatch, capsys):
+    # No Telegram credentials → hunt still works and prints the feed instead.
+    scraped = [{
+        "title": "Head of Product", "company": "GlobalCo", "location": "Remote - Worldwide",
+        "salary": "", "url": "https://example.com/globalco-hop", "platform": "remoteok",
+        "description": "Fully distributed team.",
+    }]
+
+    async def fake_scrape_all():
+        return scraped
+
+    monkeypatch.setattr(main, "_scrape_all", fake_scrape_all)
+    monkeypatch.setattr(main, "TELEGRAM_BOT_TOKEN", "")
+    monkeypatch.setattr(main, "TELEGRAM_CHAT_ID", "")
+
+    result = await main.hunt()
+
+    out = capsys.readouterr().out
+    assert result["sent_to_telegram"] == 1
+    assert "GlobalCo" in out
+    assert "https://example.com/globalco-hop" in out
+
+
+async def test_list_jobs_prints_grouped_by_company(temp_db, capsys):
+    database.insert_job(
+        title="Senior Product Manager", company="Acme", location="Remote - EMEA",
+        salary="", url="https://example.com/acme-spm", platform="greenhouse",
+        description="", filter_verdict="include",
+    )
+    database.insert_job(
+        title="Head of Product", company="Acme", location="Remote",
+        salary="", url="https://example.com/acme-hop", platform="greenhouse",
+        description="", filter_verdict="flag",
+    )
+
+    await main.list_jobs()
+
+    out = capsys.readouterr().out
+    assert "Acme" in out
+    assert "Senior Product Manager" in out
+    assert "Head of Product" in out
+    assert "check remote scope" in out  # flag verdict is marked
+
+
+async def test_list_jobs_empty_queue_hints_hunt(temp_db, capsys):
+    await main.list_jobs()
+    assert "hunt" in capsys.readouterr().out
 
 
 async def test_apply_marks_approved_jobs_applied(temp_db, monkeypatch):

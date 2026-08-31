@@ -47,17 +47,25 @@ class TestAtsCommon:
         ash = AshbySource().boards
         assert "pleo" in ash and ash.index("pleo") < ash.index("notion")
 
-    def test_title_match_keeps_product_drops_other(self):
+    def test_title_match_keeps_target_drops_other(self):
+        # The target is deliberately narrow: Head of Product + Senior Product
+        # Manager only (see ROLE_MATCH_KEYWORDS).
         s = GreenhouseSource(boards=[])
         assert s._title_matches("Senior Product Manager")
+        assert s._title_matches("Senior Product Manager, Payments")
+        assert s._title_matches("Sr. Product Manager")
         assert s._title_matches("Head of Product")
-        assert s._title_matches("Group Product Manager - Messaging")
-        assert s._title_matches("Product Lead, AI")
         assert not s._title_matches("Staff Software Engineer")
+        # Adjacent PM-shaped titles are out of target now.
+        assert not s._title_matches("Group Product Manager - Messaging")
+        assert not s._title_matches("Product Lead, AI")
+        assert not s._title_matches("Product Manager")
         # Precision: non-PM "product" roles must not match (caught in live smoke).
         assert not s._title_matches("Staff Product Designer")
         assert not s._title_matches("Senior Product Designer, Design Systems")
         assert not s._title_matches("Product Marketing Manager")
+        assert not s._title_matches("Head of Product Design")
+        assert not s._title_matches("Head of Product Marketing")
 
     def test_title_match_drops_junior_seniority(self):
         s = GreenhouseSource(boards=[])
@@ -66,7 +74,7 @@ class TestAtsCommon:
         assert not s._title_matches("Product Management Intern")
         assert not s._title_matches("Graduate Product Manager")
         # The intern-substring guard: "International" must survive.
-        assert s._title_matches("International Product Manager")
+        assert s._title_matches("Senior Product Manager, International")
         assert s._title_matches("Senior Product Manager")
 
     async def test_board_failure_is_skipped(self, monkeypatch):
@@ -113,7 +121,7 @@ class TestLever:
     async def test_parses_filters_normalizes(self, monkeypatch):
         src = LeverSource(boards=["acme"])
         payload = [
-            {"text": "Group Product Manager", "categories": {"location": "London, UK"},
+            {"text": "Senior Product Manager", "categories": {"location": "London, UK"},
              "workplaceType": "remote",
              "hostedUrl": "https://jobs.lever.co/acme/1", "descriptionPlain": "Lead products"},
             {"text": "Account Executive", "categories": {"location": "NYC"},
@@ -122,7 +130,7 @@ class TestLever:
         _patch_get_json(monkeypatch, src, payload)
 
         jobs = await src.scrape()
-        assert [j["title"] for j in jobs] == ["Group Product Manager"]
+        assert [j["title"] for j in jobs] == ["Senior Product Manager"]
         assert jobs[0]["platform"] == "lever"
         assert jobs[0]["company"] == "acme"
         assert jobs[0]["url"] == "https://jobs.lever.co/acme/1"
@@ -132,7 +140,7 @@ class TestLever:
     async def test_workplace_type_hybrid_is_not_remote(self, monkeypatch):
         src = LeverSource(boards=["acme"])
         payload = [
-            {"text": "Product Manager", "categories": {"location": "Berlin"},
+            {"text": "Senior Product Manager", "categories": {"location": "Berlin"},
              "workplaceType": "hybrid", "hostedUrl": "https://jobs.lever.co/acme/3"},
         ]
         _patch_get_json(monkeypatch, src, payload)
@@ -144,7 +152,7 @@ class TestAshby:
     async def test_parses_filters_normalizes(self, monkeypatch):
         src = AshbySource(boards=["acme"])
         payload = {"jobs": [
-            {"title": "Principal Product Manager", "location": "Berlin",
+            {"title": "Head of Product", "location": "Berlin",
              "isRemote": True, "workplaceType": "Remote",
              "jobUrl": "https://jobs.ashbyhq.com/acme/1", "descriptionPlain": "Strategy"},
             {"title": "Technical Recruiter", "location": "Remote",
@@ -154,7 +162,7 @@ class TestAshby:
 
         jobs = await src.scrape()
         assert len(jobs) == 1
-        assert jobs[0]["title"] == "Principal Product Manager"
+        assert jobs[0]["title"] == "Head of Product"
         assert jobs[0]["platform"] == "ashby"
         assert jobs[0]["url"] == "https://jobs.ashbyhq.com/acme/1"
         # Structured isRemote flag survives even when location is a bare city.
@@ -163,7 +171,7 @@ class TestAshby:
     async def test_non_remote_workplace_type(self, monkeypatch):
         src = AshbySource(boards=["acme"])
         payload = {"jobs": [
-            {"title": "Product Manager", "location": "Paris", "isRemote": False,
+            {"title": "Senior Product Manager", "location": "Paris", "isRemote": False,
              "workplaceType": "Hybrid", "jobUrl": "https://jobs.ashbyhq.com/acme/3"},
         ]}
         _patch_get_json(monkeypatch, src, payload)
@@ -195,7 +203,7 @@ class TestRecruitee:
     async def test_location_falls_back_to_city_country(self, monkeypatch):
         src = RecruiteeSource(boards=["acme"])
         payload = {"offers": [
-            {"title": "Product Manager", "city": "Berlin", "country": "Germany",
+            {"title": "Senior Product Manager", "city": "Berlin", "country": "Germany",
              "careers_url": "https://acme.recruitee.com/o/pm"},
         ]}
         _patch_get_json(monkeypatch, src, payload)
@@ -207,7 +215,7 @@ class TestSmartRecruiters:
     async def test_parses_filters_builds_public_url(self, monkeypatch):
         src = SmartRecruitersSource(boards=["Acme"])
         payload = {"content": [
-            {"name": "Product Manager", "id": "123",
+            {"name": "Senior Product Manager", "id": "123",
              "location": {"city": "Paris", "country": "fr", "remote": False,
                           "fullLocation": "Paris, France"}},
             {"name": "Sales Lead", "id": "456",
@@ -216,7 +224,7 @@ class TestSmartRecruiters:
         _patch_get_json(monkeypatch, src, payload)
 
         jobs = await src.scrape()
-        assert [j["title"] for j in jobs] == ["Product Manager"]
+        assert [j["title"] for j in jobs] == ["Senior Product Manager"]
         assert jobs[0]["platform"] == "smartrecruiters"
         assert jobs[0]["url"] == "https://jobs.smartrecruiters.com/Acme/123"
         assert jobs[0]["location"] == "Paris, France"
@@ -236,7 +244,7 @@ class TestSmartRecruiters:
     async def test_id_falls_back_to_ref_tail(self, monkeypatch):
         src = SmartRecruitersSource(boards=["Acme"])
         payload = {"content": [
-            {"name": "Product Lead", "location": {"fullLocation": "Berlin"},
+            {"name": "Head of Product", "location": {"fullLocation": "Berlin"},
              "ref": "https://api.smartrecruiters.com/v1/companies/Acme/postings/999"},
         ]}
         _patch_get_json(monkeypatch, src, payload)

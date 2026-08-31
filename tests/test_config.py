@@ -16,6 +16,17 @@ class TestValidateConfig:
         errors = validate_config("nonexistent")
         assert errors == []
 
+    def test_list_needs_no_credentials(self):
+        assert validate_config("list") == []
+
+    def test_hunt_runs_without_telegram(self, monkeypatch):
+        # hunt no longer hard-requires Telegram — with no credentials the results
+        # are printed instead of sent for review.
+        import config.settings as settings
+        monkeypatch.setattr(settings, "TELEGRAM_BOT_TOKEN", "")
+        monkeypatch.setattr(settings, "TELEGRAM_CHAT_ID", "")
+        assert settings.validate_config("hunt") == []
+
 
 class TestModuleImports:
     """Verify key functions/classes are importable from their modules."""

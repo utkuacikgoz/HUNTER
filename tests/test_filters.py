@@ -6,8 +6,9 @@ from scraper.filters import (
     JobVerdict,
     check_sponsor_allowlist,
     classify_region,
-    detect_country_locked_remote,
+    detect_eligible_remote_scope,
     detect_freelance,
+    detect_ineligible_remote_lock,
     detect_remote,
     detect_us_only_blocker,
     evaluate_job,
@@ -39,6 +40,16 @@ class TestDetectUsOnlyBlocker:
     def test_empty(self):
         assert detect_us_only_blocker({"description": ""}) is None
         assert detect_us_only_blocker({}) is None
+
+    def test_ignore_sponsorship_skips_visa_language(self):
+        # On a role explicitly open to the candidate's remote scope, "no visa
+        # sponsorship" is noise — remote-from-Turkey work needs no visa.
+        job = {"description": "Great team. No visa sponsorship available."}
+        assert detect_us_only_blocker(job, ignore_sponsorship=True) is None
+
+    def test_ignore_sponsorship_keeps_residency_blockers(self):
+        job = {"description": "Must be located in the United States to apply."}
+        assert detect_us_only_blocker(job, ignore_sponsorship=True) is not None
 
 
 class TestDetectRemote:
@@ -129,11 +140,12 @@ class TestClassifyRegionBoundaries:
         assert classify_region(job) == expected
 
 
-class TestDetectCountryLockedRemote:
-    """US/Canada-locked remote roles: candidate is EMEA, so these should drop."""
+class TestDetectIneligibleRemoteLock:
+    """Remote roles locked to a region the candidate (Turkey-based, no US/EU/UK
+    permit) can't work from should drop — US/Canada, EU, and UK alike."""
 
-    # The three real examples from production (form3 / mercury / paxos).
     LOCKED = [
+        # US/Canada (form3 / mercury / paxos production examples).
         "100% Remote (US/Canada*)",
         "San Francisco, CA, New York, NY, Portland, OR, or Remote within Canada or United States",
         "Remote - United States",
@@ -141,30 +153,53 @@ class TestDetectCountryLockedRemote:
         "Remote U.S.",               # punctuated form (Ashby's default)
         "Remote (USA only)",
         "Remote, Canada",
+        # EU — the candidate has no EU work permit, so EU-remote is not takeable.
+        "Remote (EU)",
+        "Remote - Europe",
+        "Remote - Germany",
+        "Berlin, Germany - Remote",
+        # UK — same story.
+        "Remote - UK",
+        "London, UK (Remote)",
+        "Remote - US, UK",           # both jurisdictions are ineligible
     ]
-    # Open to the candidate or global → not a lock.
+    # Open to the candidate (global / EMEA / Turkey) or not remote at all → not a lock.
     NOT_LOCKED = [
         "Remote - EMEA",
-        "Remote (EU)",
-        "Remote - US, UK",          # also opens to UK (EMEA)
         "Remote - Worldwide",
         "Remote (Anywhere)",
+        "Remote - Turkey",
+        "Remote - EU, EMEA",         # EMEA scope includes Turkey
         "Remote",                    # no country at all
-        "London, UK",               # not even US/Canada
+        "London, UK",                # not remote — handled by the on-site drop instead
     ]
 
     @pytest.mark.parametrize("location", LOCKED)
     def test_locked(self, location):
-        assert detect_country_locked_remote({"location": location}) is not None
+        assert detect_ineligible_remote_lock({"location": location}) is not None
 
     @pytest.mark.parametrize("location", NOT_LOCKED)
     def test_not_locked(self, location):
-        assert detect_country_locked_remote({"location": location}) is None
+        assert detect_ineligible_remote_lock({"location": location}) is None
 
     def test_onsite_us_is_not_locked_remote(self):
         # On-site (no remote token, no is_remote flag) isn't a "locked remote" — handled
         # by the not-remote drop instead.
-        assert detect_country_locked_remote({"location": "San Francisco, CA"}) is None
+        assert detect_ineligible_remote_lock({"location": "San Francisco, CA"}) is None
+
+
+class TestDetectEligibleRemoteScope:
+    ELIGIBLE = ["Remote - EMEA", "Remote - Worldwide", "Remote (Anywhere)",
+                "Remote - Turkey", "Remote - MENA", "Global Remote"]
+    NOT_ELIGIBLE = ["Remote", "Remote - US", "Remote (EU)", "Remote - UK", ""]
+
+    @pytest.mark.parametrize("location", ELIGIBLE)
+    def test_eligible(self, location):
+        assert detect_eligible_remote_scope({"location": location}) is True
+
+    @pytest.mark.parametrize("location", NOT_ELIGIBLE)
+    def test_not_eligible(self, location):
+        assert detect_eligible_remote_scope({"location": location}) is False
 
 
 class TestDetectFreelance:
@@ -219,15 +254,20 @@ class TestDetectFreelance:
             "location": "San Francisco, CA, New York, NY, United States",
             "is_remote": True,
         }
-        assert detect_country_locked_remote(job) is not None
+        assert detect_ineligible_remote_lock(job) is not None
+
+    def test_structured_remote_eu_city_is_locked(self):
+        # Same shape for an EU city: "remote within Germany" — no EU permit, drop.
+        job = {"location": "Berlin", "is_remote": True}
+        assert detect_ineligible_remote_lock(job) is not None
 
     def test_us_based_in_title_is_locked(self):
         # The Toptal case: "US-Based" in the title with a non-US-locked location.
         job = {"title": "VP of Product - US-Based", "location": "Remote"}
-        assert detect_country_locked_remote(job) is not None
+        assert detect_ineligible_remote_lock(job) is not None
 
     def test_us_only_in_title_is_locked(self):
-        assert detect_country_locked_remote(
+        assert detect_ineligible_remote_lock(
             {"title": "Senior PM (US only)", "location": "Remote"}
         ) is not None
 
@@ -265,17 +305,49 @@ class TestCheckSponsorAllowlist:
 
 
 class TestEvaluateJob:
-    def test_allowlisted_emea_remote_includes(self):
+    def test_emea_remote_includes(self):
+        v = evaluate_job({
+            "title": "Senior PM",
+            "company": "Stripe",
+            "location": "Remote - EMEA",
+            "description": "Join us building",
+        })
+        assert v.verdict == "include"
+        assert v.region == "emea"
+        assert v.is_remote is True
+
+    def test_eu_locked_remote_drops(self):
+        # The core new-brief rule: "EU remote" needs an EU work permit the
+        # candidate doesn't have — not eligible, whoever the company is.
         v = evaluate_job({
             "title": "Senior PM",
             "company": "Stripe",
             "location": "Remote, Europe",
             "description": "Join us building",
         })
+        assert v.verdict == "drop"
+        assert "locked to region" in v.reasons[0]
+
+    def test_uk_locked_remote_drops(self):
+        v = evaluate_job({
+            "title": "Head of Product",
+            "company": "SomeCo",
+            "location": "Remote - UK",
+            "description": "",
+        })
+        assert v.verdict == "drop"
+        assert "locked to region" in v.reasons[0]
+
+    def test_worldwide_remote_includes_despite_no_sponsorship_language(self):
+        # A worldwide-remote role needs no visa; "no sponsorship" prose is noise.
+        v = evaluate_job({
+            "title": "Senior Product Manager",
+            "company": "SomeCo",
+            "location": "Remote - Worldwide",
+            "description": "We are unable to provide visa sponsorship.",
+        })
         assert v.verdict == "include"
-        assert v.region == "eu"
         assert v.is_remote is True
-        assert v.sponsor_status == "allowlist"
 
     def test_us_only_blocker_drops(self):
         v = evaluate_job({
@@ -287,15 +359,15 @@ class TestEvaluateJob:
         assert v.verdict == "drop"
         assert "us-only language" in v.reasons[0]
 
-    def test_unknown_sponsor_eu_remote_flags(self):
+    def test_eu_city_remote_drops(self):
         v = evaluate_job({
             "title": "PM",
             "company": "FooCorp",
             "location": "Berlin, Germany - Remote",
             "description": "Awesome team in EU.",
         })
-        assert v.verdict == "flag"
-        assert v.region == "eu"
+        assert v.verdict == "drop"
+        assert "locked to region" in v.reasons[0]
 
     def test_not_remote_drops(self):
         v = evaluate_job({
@@ -308,8 +380,22 @@ class TestEvaluateJob:
         assert v.is_remote is False
 
     def test_structured_remote_flag_rescues_bare_city_role(self):
-        # The core bug fix end-to-end: an ATS role with a bare-city location but a
-        # structured is_remote=True flag must NOT drop as "not marked remote".
+        # An ATS role with a bare-city location but a structured is_remote=True
+        # flag must NOT drop as "not marked remote". With an eligible city
+        # (Istanbul) it's a confident include.
+        v = evaluate_job({
+            "title": "Senior PM",
+            "company": "FooCorp",
+            "location": "Istanbul",
+            "description": "Product team.",
+            "is_remote": True,
+        })
+        assert v.verdict == "include"
+        assert v.is_remote is True
+        assert v.region == "emea"
+
+    def test_structured_remote_eu_city_drops(self):
+        # Same shape, EU city: "remote within Germany" — not takeable.
         v = evaluate_job({
             "title": "Senior PM",
             "company": "FooCorp",
@@ -317,9 +403,8 @@ class TestEvaluateJob:
             "description": "EU product team.",
             "is_remote": True,
         })
-        assert v.verdict == "flag"
-        assert v.is_remote is True
-        assert v.region == "eu"
+        assert v.verdict == "drop"
+        assert "locked to region" in v.reasons[0]
 
     def test_ashby_remote_us_role_drops_as_us_locked(self):
         # Ashby's "Remote U.S." + isRemote=True: now recognized as US-locked so an
@@ -332,7 +417,7 @@ class TestEvaluateJob:
             "is_remote": True,
         })
         assert v.verdict == "drop"
-        assert "locked to US/Canada" in v.reasons[0]
+        assert "locked to region" in v.reasons[0]
 
     def test_allowlist_overrides_unknown_region(self):
         v = evaluate_job({
@@ -364,7 +449,7 @@ class TestEvaluateJob:
             "description": "",
         })
         assert v.verdict == "drop"
-        assert "locked to US/Canada" in v.reasons[0]
+        assert "locked to region" in v.reasons[0]
 
     def test_structured_us_remote_drops_even_for_allowlist_company(self):
         # The Figma card from production: sponsor-friendly company, structured
@@ -378,7 +463,7 @@ class TestEvaluateJob:
             "is_remote": True,
         })
         assert v.verdict == "drop"
-        assert "locked to US/Canada" in v.reasons[0]
+        assert "locked to region" in v.reasons[0]
 
     def test_us_canada_locked_remote_drops(self):
         # The form3 production case: unknown sponsor, "100% Remote (US/Canada)".
@@ -389,18 +474,20 @@ class TestEvaluateJob:
             "description": "Join our payments team.",
         })
         assert v.verdict == "drop"
-        assert "locked to US/Canada" in v.reasons[0]
+        assert "locked to region" in v.reasons[0]
 
-    def test_emea_remote_unknown_sponsor_still_flags(self):
-        # The lock check must not over-reach: EMEA remote stays a flag, not a drop.
+    def test_emea_remote_unknown_sponsor_includes(self):
+        # EMEA scope includes Turkey — a confident include even with no sponsor
+        # signal (remote-from-Turkey work needs no visa).
         v = evaluate_job({
             "title": "Senior PM",
             "company": "SomeFintech",
             "location": "Remote - EMEA",
             "description": "Pan-European team.",
         })
-        assert v.verdict == "flag"
+        assert v.verdict == "include"
         assert v.region == "emea"
+        assert any("open to candidate" in r for r in v.reasons)
 
     def test_blocklisted_company_drops(self, monkeypatch):
         monkeypatch.setattr(filters, "SPONSOR_BLOCKLIST_COMPANIES", {"blockedco"})
@@ -496,7 +583,7 @@ class TestAllowOnsiteFreelance:
         v = evaluate_job({
             "title": "Growth Marketing Manager",
             "company": "Stripe",
-            "location": "Remote, Europe",
+            "location": "Remote - EMEA",
             "description": "Permanent role.",
         })
         assert v.verdict == "include"
@@ -522,12 +609,13 @@ class TestEvaluateJobAsync:
     """The LLM sponsor-scoring layer: only runs on flag+unknown jobs and can flip the
     verdict to include (yes) or drop (no), or leave it flagged (unclear / error)."""
 
-    # An unknown-sponsor EU-remote job → sync verdict is flag/unknown, so the LLM runs.
+    # An unknown-sponsor, unknown-scope remote job → sync verdict is flag/unknown,
+    # so the LLM runs.
     FLAG_JOB = {
         "title": "PM",
         "company": "FooCorp",
-        "location": "Berlin, Germany - Remote",
-        "description": "Awesome team in EU.",
+        "location": "Remote",
+        "description": "Awesome distributed team.",
     }
 
     def _scorer(self, verdict, *, recorder=None):
@@ -579,7 +667,7 @@ class TestEvaluateJobAsync:
         calls: list = []
         job = {
             "title": "Senior PM", "company": "Stripe",
-            "location": "Remote, Europe", "description": "EU remote.",
+            "location": "Remote", "description": "All-remote company.",
         }
         v = await evaluate_job_async(job, llm_score=self._scorer("no", recorder=calls))
         assert v.verdict == "include"
