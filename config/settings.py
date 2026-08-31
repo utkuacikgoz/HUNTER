@@ -182,10 +182,9 @@ ASHBY_BOARDS = _csv_list(
     # EU/EMEA + global-remote batch, live-verified 2026-07-28
     "elevenlabs,attio,checkly,revenuecat,kong,resend,mazedesign,infisical,"
     "junction,natter,phantom,assured,"
-    # web3/crypto batch. dune live-verified 2026-08-31; the others are best-guess
-    # tokens for crypto companies that left Greenhouse — run
-    # `python -m scripts.verify_boards --quiet` and prune any DEAD ones.
-    "dune,opensea,alchemy,uniswaplabs,kraken",
+    # web3/crypto batch, live-verified 2026-08-31 (uniswaplabs/kraken guesses
+    # came back dead and were pruned).
+    "dune,opensea,alchemy",
 )
 # US-only-remote AI labs / startups — scanned last (leftover cap only).
 ASHBY_US_BOARDS = _csv_list(
@@ -200,12 +199,14 @@ RECRUITEE_BOARDS = _csv_list("RECRUITEE_BOARDS", "bunq")
 # Visa pruned 2026-08-31 (board returns 0 postings).
 SMARTRECRUITERS_COMPANIES = _csv_list("SMARTRECRUITERS_COMPANIES", "")
 # Catalog sources list every role on a board; keep only titles containing one of
-# these (case-insensitive substring). The target is deliberately narrow — the
-# candidate wants exactly Head of Product and Senior Product Manager roles, not
-# every PM-shaped title. Widen via env if the feed runs too thin.
+# these (case-insensitive substring). Target: Head of Product / Senior Product
+# Manager, widened (2026-08-31, feed ran thin) to the adjacent senior-plus
+# titles — lead/principal/director. Deliberately still excludes bare "product
+# manager", group PM, and product owner. Override via env to retarget.
 ROLE_MATCH_KEYWORDS = _csv_list(
     "ROLE_MATCH_KEYWORDS",
-    "head of product,senior product manager,sr product manager,sr. product manager",
+    "head of product,senior product manager,sr product manager,sr. product manager,"
+    "lead product manager,principal product manager,director of product",
 )
 # Titles containing one of these (whole-word match) are dropped even if they also match a
 # ROLE_MATCH_KEYWORD — the candidate wants senior+ roles. Matched word-boundary-safe so
@@ -214,8 +215,9 @@ ROLE_EXCLUDE_KEYWORDS = _csv_list(
     "ROLE_EXCLUDE_KEYWORDS",
     "junior,jr,associate,intern,apprentice,working student,graduate,"
     "entry level,entry-level,trainee,co-op,student,"
-    # "Head of Product X" adjacent functions that aren't the PM role itself.
-    "head of product design,head of product marketing",
+    # "Head/Director of Product X" adjacent functions that aren't the PM role itself.
+    "head of product design,head of product marketing,"
+    "director of product design,director of product marketing",
 )
 # Platforms applicant/engine.py can drive a browser to auto-submit. Sources outside this set
 # (RemoteOK / WeWorkRemotely / Recruitee / SmartRecruiters) are apply-link-only.

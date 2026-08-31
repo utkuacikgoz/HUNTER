@@ -55,8 +55,12 @@ class TestAtsCommon:
         assert s._title_matches("Senior Product Manager, Payments")
         assert s._title_matches("Sr. Product Manager")
         assert s._title_matches("Head of Product")
+        # Widened senior-plus titles (2026-08-31).
+        assert s._title_matches("Lead Product Manager, Growth")
+        assert s._title_matches("Principal Product Manager")
+        assert s._title_matches("Director of Product")
         assert not s._title_matches("Staff Software Engineer")
-        # Adjacent PM-shaped titles are out of target now.
+        # Adjacent PM-shaped titles are still out of target.
         assert not s._title_matches("Group Product Manager - Messaging")
         assert not s._title_matches("Product Lead, AI")
         assert not s._title_matches("Product Manager")
@@ -66,6 +70,8 @@ class TestAtsCommon:
         assert not s._title_matches("Product Marketing Manager")
         assert not s._title_matches("Head of Product Design")
         assert not s._title_matches("Head of Product Marketing")
+        assert not s._title_matches("Director of Product Design")
+        assert not s._title_matches("Director of Product Marketing")
 
     def test_title_match_drops_junior_seniority(self):
         s = GreenhouseSource(boards=[])
