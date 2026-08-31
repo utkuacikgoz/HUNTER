@@ -37,7 +37,6 @@ with mock.patch.dict(os.environ, {"DB_PATH": _tmp.name}):
         record_followup,
         record_scraper_run,
         reject_job,
-        set_cover_letter,
         should_skip_scraper,
         update_job_status,
     )
@@ -270,14 +269,6 @@ class TestStats:
         assert s["applied_this_month"] == 1
 
 
-class TestCoverLetter:
-    def test_set_cover_letter(self):
-        job_id = insert_job("PM", "Co", "NY", "", "https://example.com/cl1", "linkedin")
-        set_cover_letter(job_id, "Dear Hiring Manager...")
-        job = get_job_by_id(job_id)
-        assert job["cover_letter"] == "Dear Hiring Manager..."
-
-
 class TestLogAction:
     def test_log_action_standalone(self):
         job_id = insert_job("PM", "Co", "NY", "", "https://example.com/la1", "linkedin")
@@ -494,7 +485,7 @@ class TestDedupSuppression:
 
     def test_twin_under_different_url_suppressed_after_skip(self):
         a = insert_job("Product Manager", "Acme", "Remote", "", "https://a.com/1", "greenhouse")
-        reject_job(a)  # the Telegram "Skip" path sets status='rejected'
+        reject_job(a)  # user skipped it: status='rejected'
         b = insert_job("Product Manager", "Acme", "Remote", "", "https://b.com/2", "lever")
         assert b is not None  # twin is still stored (different URL)
         pending_ids = {j["id"] for j in get_pending_jobs()}

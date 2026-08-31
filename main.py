@@ -1,47 +1,31 @@
-"""HUNTER - Job Hunting Automation Tool.
+"""HUNTER — job hunting automation.
 
-Main orchestrator that ties scraping, Telegram, auto-apply, and tracking together.
+Scrapes job sources, filters to remote roles the candidate can actually take,
+stores them in SQLite, and prints the result. Runs entirely locally: no
+credentials, no network beyond the job sources themselves.
 """
 import asyncio
 import logging
-import signal
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 
-from applicant.engine import apply_to_approved_jobs
-from config.log_redaction import install_redaction
 from config.settings import (
-    BACKUP_SCHEDULE_HOUR,
-    BACKUP_SCHEDULE_MINUTE,
     BASE_DIR,
-    CLASSIFY_CONCURRENCY,
     DB_BACKUP_DIR,
     DB_PATH,
-    ENABLE_AUTO_APPLY,
     ENABLE_BROWSER_SCRAPERS,
-    ENABLE_LLM_SPONSOR_SCORING,
-    FOLLOWUP_SCHEDULE_HOUR,
-    HUNT_SCHEDULE_HOUR,
-    HUNT_SCHEDULE_MINUTE,
-    HUNTER_PROFILES,
     LOCATIONS,
     LOG_LEVEL,
-    MAX_APPLIES_PER_RUN,
     MAX_JOBS_PER_DAY,
     MAX_QUERIES_PER_RUN,
-    PRUNE_SCHEDULE_HOUR,
-    PRUNE_SCHEDULE_MINUTE,
     SCRAPER_RETRY_AFTER_DAYS,
     SCRAPER_SKIP_AFTER_ZEROS,
     SEARCH_QUERIES,
     SOURCE_FETCH_CAP,
-    TELEGRAM_BOT_TOKEN,
-    TELEGRAM_CHAT_ID,
     VELOCITY_BOOST_RANK,
     VELOCITY_HOT_THRESHOLD,
     VELOCITY_WINDOW_DAYS,
-    validate_config,
 )
 from scraper.ats import (
     AshbySource,
@@ -49,23 +33,12 @@ from scraper.ats import (
     LeverSource,
     RecruiteeSource,
 )
-from scraper.filters import evaluate_job_async
+from scraper.filters import evaluate_job
 from scraper.remoteok import RemoteOKScraper
 from scraper.wellfound import WellfoundScraper
 from scraper.weworkremotely import WeWorkRemotelySource
-from telegram_bot.bot import (
-    _active_apply_tasks,
-    build_bot_app,
-    send_followup_reminders,
-    send_jobs_batch,
-    send_stats_message,
-    send_telegram_alert,
-    shutdown_apply_worker,
-)
 from tracker.database import (
-    get_approved_jobs,
     get_company_velocity,
-    get_last_scrape_time,
     get_pending_jobs,
     get_stats,
     init_db,
@@ -88,10 +61,6 @@ logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     handlers=[_stream_handler, _file_handler],
 )
-# Defense-in-depth: scrub secret-shaped strings (Telegram token, API keys, li_at)
-# from EVERY log record on our handlers, and quiet chatty libraries (httpx/telegram
-# log request URLs that embed the bot token). See config/log_redaction.py.
-install_redaction(logging.getLogger(), quiet_chatty=True)
 logger = logging.getLogger("hunter")
 
 
@@ -105,12 +74,10 @@ def _build_scrapers() -> list:
     (no remote field → most roles read as not-remote) and the flaky browser scraper
     go last so they don't starve the better sources.
 
-    Wellfound is the only browser scraper left (it launches Chromium);
-    ENABLE_BROWSER_SCRAPERS=false runs API-only (lighter RAM — e.g. a co-located
-    cover-letter-only profile).
+    Wellfound is the only browser scraper (it launches Chromium);
+    ENABLE_BROWSER_SCRAPERS=false runs API-only, with no browser install needed.
     """
     scrapers: list = [
-        # LinkedInScraper(headless=True),  # Disabled - session-cookie issues; kept for Phase 3 hybrid apply
         RemoteOKScraper(),                # remote-only, API (no browser)
         WeWorkRemotelySource(),           # remote-only
         AshbySource(),                    # structured isRemote / workplaceType
@@ -124,7 +91,7 @@ def _build_scrapers() -> list:
 
 
 def _skip_recovery_hint() -> str:
-    """How an auto-skipped source comes back — same wording in the log and the alert."""
+    """How an auto-skipped source comes back — same wording everywhere."""
     if SCRAPER_RETRY_AFTER_DAYS > 0:
         return f"Retrying automatically in {SCRAPER_RETRY_AFTER_DAYS}d."
     return "Clear scraper_health to re-enable (SCRAPER_RETRY_AFTER_DAYS=0 → no auto-retry)."
@@ -134,7 +101,7 @@ async def _scrape_all() -> list[dict]:
     """Run every enabled scraper. Skips scrapers stuck on zero-yield streaks."""
     scrapers = _build_scrapers()
     fetch_cap = max(1, SOURCE_FETCH_CAP)
-    # Bound total raw collection so a quiet filter run can't OOM the box; the
+    # Bound total raw collection so a quiet filter run can't exhaust memory; the
     # classifier stops at MAX_JOBS_PER_DAY fresh regardless.
     collect_ceiling = MAX_JOBS_PER_DAY * 4
     location = LOCATIONS[0] if LOCATIONS else ""
@@ -179,14 +146,12 @@ async def _scrape_all() -> list[dict]:
             all_jobs.extend(scraper_jobs)
 
         # This run just completed the zero-yield streak, so the next hunt will skip
-        # this source. Say so once, here, at the transition — the worker's logs are
-        # ephemeral, and a silently dropped source is otherwise invisible until the
-        # review queue quietly thins out. (Skipped runs record nothing, so this
-        # can't re-fire until the retry window elapses and the retry also fails.)
+        # this source. Say so once, here, at the transition — a silently dropped
+        # source is otherwise invisible until the feed quietly thins out.
         if not scraper_jobs and should_skip_scraper(
             platform, SCRAPER_SKIP_AFTER_ZEROS, SCRAPER_RETRY_AFTER_DAYS
         ):
-            await send_telegram_alert(
+            logger.warning(
                 f"🚨 Source '{platform}' returned 0 jobs {SCRAPER_SKIP_AFTER_ZEROS} runs in a row "
                 f"— pausing it. {_skip_recovery_hint()}"
             )
@@ -194,50 +159,37 @@ async def _scrape_all() -> list[dict]:
     return all_jobs
 
 
-async def _classify_and_store(jobs: list[dict]) -> tuple[int, dict[str, int]]:
+def _classify_and_store(jobs: list[dict]) -> tuple[int, dict[str, int]]:
     """Evaluate each scraped job, persist it, and return (new_count, verdict_counts)."""
-    llm_score = None
-    if ENABLE_LLM_SPONSOR_SCORING:
-        from prompts.generator import score_sponsor_signal
-        llm_score = score_sponsor_signal
-
     counts = {"include": 0, "flag": 0, "drop": 0}
     new_count = 0
     reviewable = 0
-    # Classify in bounded-concurrency chunks: the sponsor-scoring LLM call is a network
-    # round-trip, so scoring a chunk in parallel cuts the classify phase several-fold.
-    # Inserts and the reviewable cap stay sequential to preserve source-survival ordering;
-    # we over-score at most one chunk past the budget before breaking.
-    for start in range(0, len(jobs), CLASSIFY_CONCURRENCY):
-        chunk = jobs[start:start + CLASSIFY_CONCURRENCY]
-        verdicts = await asyncio.gather(
-            *(evaluate_job_async(job, llm_score=llm_score) for job in chunk)
-        )
-        for job, verdict in zip(chunk, verdicts, strict=True):
-            counts[verdict.verdict] += 1
+    for job in jobs:
+        verdict = evaluate_job(job)
+        counts[verdict.verdict] += 1
 
-            job_id = insert_job(
-                title=job["title"],
-                company=job["company"],
-                location=job["location"],
-                salary=job["salary"],
-                url=job["url"],
-                platform=job["platform"],
-                description=job.get("description", ""),
-                region=verdict.region,
-                is_remote=verdict.is_remote,
-                is_freelance=verdict.is_freelance,
-                sponsor_status=verdict.sponsor_status,
-                filter_verdict=verdict.verdict,
-                filter_reasons="; ".join(verdict.reasons)[:500] if verdict.reasons else None,
-            )
-            if job_id:
-                new_count += 1
-                if verdict.verdict != "drop":
-                    reviewable += 1
+        job_id = insert_job(
+            title=job["title"],
+            company=job["company"],
+            location=job["location"],
+            salary=job["salary"],
+            url=job["url"],
+            platform=job["platform"],
+            description=job.get("description", ""),
+            region=verdict.region,
+            is_remote=verdict.is_remote,
+            is_freelance=verdict.is_freelance,
+            sponsor_status=verdict.sponsor_status,
+            filter_verdict=verdict.verdict,
+            filter_reasons="; ".join(verdict.reasons)[:500] if verdict.reasons else None,
+        )
+        if job_id:
+            new_count += 1
+            if verdict.verdict != "drop":
+                reviewable += 1
         # Cap on REVIEWABLE (include/flag) jobs, not total inserts — drops are still
-        # persisted for dedup but must not consume the day's review budget, or a
-        # high-drop source could exhaust it before the good jobs are reached.
+        # persisted for dedup but must not consume the day's budget, or a high-drop
+        # source could exhaust it before the good jobs are reached.
         if reviewable >= MAX_JOBS_PER_DAY:
             break
     return new_count, counts
@@ -268,69 +220,9 @@ def _rank_pending_by_velocity(velocity: dict[str, int]) -> list[dict]:
     return pending
 
 
-async def hunt():
-    """Scrape jobs from all platforms, filter, and send to Telegram."""
-    logger.info("🎯 Starting job hunt...")
-
-    all_jobs = await _scrape_all()
-    new_count, counts = await _classify_and_store(all_jobs)
-
-    velocity = get_company_velocity(days=VELOCITY_WINDOW_DAYS)
-    hot = sorted(
-        ((c, n) for c, n in velocity.items() if n >= VELOCITY_HOT_THRESHOLD),
-        key=lambda kv: kv[1],
-        reverse=True,
-    )[:5]
-    logger.info(
-        f"📊 Scraped {len(all_jobs)} total, {new_count} new jobs added "
-        f"(filter: {counts['include']} include / {counts['flag']} flag / {counts['drop']} drop) "
-        f"· hot companies (≥{VELOCITY_HOT_THRESHOLD} roles in {VELOCITY_WINDOW_DAYS}d): "
-        f"{hot or 'none'}"
-    )
-
-    pending = _rank_pending_by_velocity(velocity)
-    if not pending:
-        logger.info("No new jobs to send")
-    elif TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-        logger.info(f"📱 Sending {len(pending)} jobs to Telegram...")
-        await send_jobs_batch(pending)
-    else:
-        # No Telegram configured — print the list instead so a credential-free
-        # local run still delivers the feed.
-        print_job_list(pending)
-
-    return {"scraped": len(all_jobs), "new": new_count, "sent_to_telegram": len(pending)}
-
-
-async def apply():
-    """Apply to all approved jobs."""
-    if not ENABLE_AUTO_APPLY:
-        logger.info("Auto-apply is disabled for this profile (ENABLE_AUTO_APPLY=false).")
-        return {"total": 0, "success": 0, "failed": 0, "needs_manual": 0}
-
-    approved = get_approved_jobs()
-    if not approved:
-        logger.info("No approved jobs to apply to")
-        return {"total": 0, "success": 0, "failed": 0, "needs_manual": 0}
-
-    logger.info(f"🚀 Applying to {len(approved)} approved jobs (cap {MAX_APPLIES_PER_RUN}/run)...")
-    results = await apply_to_approved_jobs(approved, headless=True)
-    skipped = results.get("skipped_over_cap", 0)
-    logger.info(
-        f"✅ Applied: {results['success']}/{results['total']} "
-        f"(Failed: {results['failed']}, Needs manual: {results['needs_manual']}"
-        + (f", {skipped} left for next run — over the per-run cap" if skipped else "")
-        + ")"
-    )
-
-    # Send stats after applying
-    await send_stats_message()
-    return results
-
-
 def print_job_list(jobs: list[dict]) -> None:
-    """Print reviewable jobs grouped by company. ⚠️ marks a flag verdict — the
-    remote scope wasn't explicit, so check the posting before applying."""
+    """Print open roles grouped by company. ⚠️ marks a flag verdict — the remote
+    scope wasn't explicit, so check the posting before applying."""
     by_company: dict[str, list[dict]] = {}
     for j in jobs:
         company = (j.get("company") or "").strip() or "(unknown company)"
@@ -347,8 +239,37 @@ def print_job_list(jobs: list[dict]) -> None:
         print()
 
 
+async def hunt():
+    """Scrape every source, filter, store, and print the resulting roles."""
+    logger.info("🎯 Starting job hunt...")
+
+    all_jobs = await _scrape_all()
+    new_count, counts = _classify_and_store(all_jobs)
+
+    velocity = get_company_velocity(days=VELOCITY_WINDOW_DAYS)
+    hot = sorted(
+        ((c, n) for c, n in velocity.items() if n >= VELOCITY_HOT_THRESHOLD),
+        key=lambda kv: kv[1],
+        reverse=True,
+    )[:5]
+    logger.info(
+        f"📊 Scraped {len(all_jobs)} total, {new_count} new jobs added "
+        f"(filter: {counts['include']} include / {counts['flag']} flag / {counts['drop']} drop) "
+        f"· hot companies (≥{VELOCITY_HOT_THRESHOLD} roles in {VELOCITY_WINDOW_DAYS}d): "
+        f"{hot or 'none'}"
+    )
+
+    pending = _rank_pending_by_velocity(velocity)
+    if pending:
+        print_job_list(pending)
+    else:
+        logger.info("No new roles found.")
+
+    return {"scraped": len(all_jobs), "new": new_count, "listed": len(pending)}
+
+
 async def list_jobs():
-    """List stored reviewable jobs (include/flag) — DB-only, no credentials needed."""
+    """List stored open roles (include/flag verdicts), grouped by company."""
     pending = get_pending_jobs(limit=200)
     if not pending:
         print("No open roles in the queue. Run `python main.py hunt` first.")
@@ -356,318 +277,22 @@ async def list_jobs():
     print_job_list(pending)
 
 
-async def followup():
-    """Send follow-up reminders."""
-    logger.info("📬 Checking for follow-ups...")
-    await send_followup_reminders()
-
-
 async def stats():
-    """Print and send stats."""
+    """Print DB stats."""
     s = get_stats()
     print("\n" + "=" * 40)
     print("🎯 HUNTER STATS")
     print("=" * 40)
     print(f"  Total scraped:    {s['total']}")
-    print(f"  Pending review:   {s['pending']}")
-    print(f"  Approved:         {s['approved']}")
+    print(f"  Open roles:       {s['pending']}")
+    print(f"  Saved:            {s['approved']}")
     print(f"  Applied:          {s['applied']}")
     print(f"  Interviewing:     {s['interviewing']}")
     print(f"  Offered:          {s['offered']}")
     print(f"  Rejected/Skipped: {s['rejected']}")
     print(f"  Closed:           {s['closed']}")
-    print(f"  Applied (week):   {s['applied_this_week']}")
-    print(f"  Applied (month):  {s['applied_this_month']}")
     print("=" * 40 + "\n")
     return s
-
-
-async def bot():
-    """Run the Telegram bot with scheduled jobs and graceful shutdown."""
-    if not TELEGRAM_BOT_TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN not set. Configure .env first.")
-        return
-
-    logger.info("Starting Telegram bot with scheduler...")
-    app = build_bot_app()
-
-    # --- APScheduler: daily hunt + followup ---
-    from apscheduler.schedulers.asyncio import AsyncIOScheduler
-    from apscheduler.triggers.cron import CronTrigger
-
-    # coalesce: collapse multiple missed runs into one; misfire_grace_time: still
-    # run a job that fired late (e.g. machine was briefly busy/restarting) within
-    # the hour rather than skipping it silently.
-    scheduler = AsyncIOScheduler(
-        job_defaults={"coalesce": True, "misfire_grace_time": 3600}
-    )
-
-    async def scheduled_hunt():
-        logger.info("Scheduled hunt triggered")
-        try:
-            results = await hunt()
-            sent = results.get("sent_to_telegram", 0)
-            if sent == 0:
-                await send_telegram_alert(
-                    "⚠️ Daily hunt found 0 new roles to review. Check scraper health "
-                    "(/report) — sources may be down or everything was already seen."
-                )
-        except Exception as e:
-            logger.error(f"Scheduled hunt failed: {e}")
-            await send_telegram_alert(f"🚨 Daily hunt FAILED: {str(e)[:200]}")
-
-    async def scheduled_followup():
-        logger.info("Scheduled follow-up check triggered")
-        try:
-            await followup()
-        except Exception as e:
-            logger.error(f"Scheduled follow-up failed: {e}")
-
-    async def scheduled_backup():
-        logger.info("Scheduled DB backup triggered")
-        try:
-            backup_database()
-        except Exception as e:
-            logger.error(f"Scheduled backup failed: {e}")
-
-    async def scheduled_screenshot_prune():
-        logger.info("Scheduled screenshot prune triggered")
-        try:
-            prune_screenshots(max_age_days=30)
-        except Exception as e:
-            logger.error(f"Scheduled screenshot prune failed: {e}")
-
-    scheduler.add_job(
-        scheduled_hunt,
-        CronTrigger(hour=HUNT_SCHEDULE_HOUR, minute=HUNT_SCHEDULE_MINUTE),
-        id="daily_hunt",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        scheduled_followup,
-        CronTrigger(hour=FOLLOWUP_SCHEDULE_HOUR, minute=0),
-        id="daily_followup",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        scheduled_backup,
-        CronTrigger(hour=BACKUP_SCHEDULE_HOUR, minute=BACKUP_SCHEDULE_MINUTE),
-        id="daily_backup",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        scheduled_screenshot_prune,
-        CronTrigger(hour=PRUNE_SCHEDULE_HOUR, minute=PRUNE_SCHEDULE_MINUTE),
-        id="daily_screenshot_prune",
-        replace_existing=True,
-    )
-
-    # --- Telegram command handlers ---
-    from telegram.ext import CommandHandler
-
-    from telegram_bot.bot import _is_authorized
-
-    async def cmd_hunt(update, context):
-        if not _is_authorized(update):
-            return
-        await update.message.reply_text("Starting job hunt... This may take a few minutes.")
-        results = await hunt()
-        await update.message.reply_text(
-            f"Hunt complete!\n"
-            f"Scraped: {results['scraped']}\n"
-            f"New: {results['new']}\n"
-            f"Sent to review: {results['sent_to_telegram']}"
-        )
-
-    async def cmd_apply(update, context):
-        if not _is_authorized(update):
-            return
-        if not ENABLE_AUTO_APPLY:
-            await update.message.reply_text(
-                "Auto-apply is disabled for this profile. Tap 📄 Cover Letter on a job "
-                "and apply yourself via the link."
-            )
-            return
-        approved = get_approved_jobs()
-        if not approved:
-            await update.message.reply_text("No approved jobs. Review pending jobs first!")
-            return
-        await update.message.reply_text(f"Applying to {len(approved)} jobs... This will take a while.")
-        results = await apply()
-        skipped = results.get("skipped_over_cap", 0)
-        await update.message.reply_text(
-            f"Done!\n"
-            f"✅ Submitted: {results['success']}/{results['total']}\n"
-            f"📝 Manual: {results['needs_manual']} | ❌ Failed: {results['failed']}"
-            + (f"\n⏭️ {skipped} left for next /apply (per-run cap {MAX_APPLIES_PER_RUN})" if skipped else "")
-        )
-
-    async def cmd_review(update, context):
-        if not _is_authorized(update):
-            return
-        pending = get_pending_jobs(limit=50)
-        if not pending:
-            await update.message.reply_text("No pending jobs. Run /hunt first!")
-            return
-        await send_jobs_batch(pending)
-
-    async def cmd_schedule(update, context):
-        if not _is_authorized(update):
-            return
-        jobs_info = []
-        for job in scheduler.get_jobs():
-            next_run = job.next_run_time.strftime("%Y-%m-%d %H:%M") if job.next_run_time else "paused"
-            jobs_info.append(f"  {job.id}: next at {next_run}")
-        msg = "Scheduled jobs:\n" + "\n".join(jobs_info) if jobs_info else "No scheduled jobs"
-        await update.message.reply_text(msg)
-
-    app.add_handler(CommandHandler("hunt", cmd_hunt))
-    app.add_handler(CommandHandler("apply", cmd_apply))
-    app.add_handler(CommandHandler("review", cmd_review))
-    app.add_handler(CommandHandler("schedule", cmd_schedule))
-
-    # --- Graceful shutdown ---
-    shutdown_event = asyncio.Event()
-
-    def _signal_handler(sig, _frame):
-        logger.info(f"Received signal {sig}, initiating graceful shutdown...")
-        shutdown_event.set()
-
-    signal.signal(signal.SIGINT, _signal_handler)
-    signal.signal(signal.SIGTERM, _signal_handler)
-
-    scheduler.start()
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
-
-    # Catch-up: if the worker was down across the scheduled hunt, the cron simply
-    # doesn't fire. Detect a stale last-scrape (>20h) and run one shortly after boot.
-    async def _catch_up_if_missed():
-        last = get_last_scrape_time()
-        stale = True
-        if last:
-            try:
-                last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
-                if last_dt.tzinfo is None:
-                    last_dt = last_dt.replace(tzinfo=UTC)
-                stale = (datetime.now(UTC) - last_dt) > timedelta(hours=20)
-            except ValueError:
-                stale = True
-        if stale:
-            logger.info(f"Last scrape was {last or 'never'} (>20h) — running catch-up hunt.")
-            await send_telegram_alert("⏰ Missed the daily hunt while offline — running a catch-up now.")
-            await scheduled_hunt()
-
-    asyncio.create_task(_catch_up_if_missed())
-
-    logger.info("Bot is running. Scheduler active. Send SIGINT/SIGTERM to stop.")
-    try:
-        await shutdown_event.wait()
-    finally:
-        logger.info("Shutting down...")
-        # 1. Stop accepting new Telegram updates so no new apply tasks spawn.
-        try:
-            await app.updater.stop()
-        except Exception as e:
-            logger.warning(f"updater.stop failed: {e}")
-
-        # 2. Drain the apply queue + in-flight apply, then stop the worker.
-        await shutdown_apply_worker(timeout=60.0)
-        if _active_apply_tasks:
-            pending = list(_active_apply_tasks)
-            logger.info(f"Awaiting {len(pending)} in-flight apply task(s)...")
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*pending, return_exceptions=True),
-                    timeout=30.0,
-                )
-            except TimeoutError:
-                logger.warning("Apply tasks did not finish; cancelling.")
-                for t in pending:
-                    t.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
-
-        # 3. Stop the scheduler (waits for any running scheduled jobs).
-        scheduler.shutdown(wait=True)
-
-        # 4. Tear down the Telegram application.
-        try:
-            await app.stop()
-            await app.shutdown()
-        except Exception as e:
-            logger.warning(f"app shutdown failed: {e}")
-        logger.info("Shutdown complete.")
-
-
-def run_all_profiles():
-    """Supervisor: run one `bot` process per profile in HUNTER_PROFILES.
-
-    Lets a single machine host several independent bots (e.g. Utku's PM hunt + a
-    friend's marketing hunt) from one checkout — each child gets its own
-    HUNTER_PROFILE, which loads its own `.env.<profile>` overlay and DB. An empty
-    entry ("") means the default (no-profile) bot.
-
-    Resilience: each child is supervised independently — if one exits it's
-    restarted (with a short backoff so a misconfigured profile can't hot-loop or
-    take its sibling down). This preserves single-bot behavior (a crashed bot comes
-    back) without one bad profile killing the others. SIGINT/SIGTERM is forwarded so
-    every child shuts down gracefully, then the supervisor waits for them and exits.
-    """
-    import os
-    import subprocess
-    import time
-
-    def _spawn(profile: str) -> subprocess.Popen:
-        env = {**os.environ, "HUNTER_PROFILE": profile}
-        return subprocess.Popen([sys.executable, str(BASE_DIR / "main.py"), "bot"], env=env)
-
-    children: dict[str, subprocess.Popen] = {}
-    started_at: dict[str, float] = {}
-    for profile in HUNTER_PROFILES:
-        logger.info(f"Starting bot process for profile '{profile or 'default'}'...")
-        children[profile] = _spawn(profile)
-        started_at[profile] = time.monotonic()
-
-    shutting_down = {"v": False}
-
-    def _forward(sig, _frame):
-        shutting_down["v"] = True
-        logger.info(f"Supervisor received signal {sig}; forwarding to {len(children)} child(ren)...")
-        for p in children.values():
-            p.send_signal(sig)
-
-    signal.signal(signal.SIGINT, _forward)
-    signal.signal(signal.SIGTERM, _forward)
-
-    while not shutting_down["v"]:
-        for profile, p in list(children.items()):
-            if p.poll() is None:
-                continue
-            # Child exited unexpectedly — restart it. Back off if it died young
-            # (likely a startup/config failure) so a broken profile can't hot-loop.
-            uptime = time.monotonic() - started_at[profile]
-            delay = 0 if uptime >= 60 else 10
-            logger.error(
-                f"Bot for profile '{profile or 'default'}' exited (code {p.returncode}); "
-                f"restarting in {delay}s."
-            )
-            if delay:
-                time.sleep(delay)
-            if shutting_down["v"]:
-                break
-            children[profile] = _spawn(profile)
-            started_at[profile] = time.monotonic()
-        time.sleep(1)
-
-    # Graceful shutdown: signal already forwarded; wait for each child to drain.
-    for profile, p in children.items():
-        try:
-            p.wait(timeout=90)
-        except subprocess.TimeoutExpired:
-            logger.warning(f"Bot for profile '{profile or 'default'}' did not exit in time; killing.")
-            p.kill()
-    sys.exit(0)
 
 
 def backup_database():
@@ -678,8 +303,7 @@ def backup_database():
     DB_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     # Key the backup name on the DB stem so co-located profiles (hunter.db vs
-    # hunter_<profile>.db) don't collide on the same-second timestamp. The prune glob
-    # below ("hunter_*") still matches both stems.
+    # hunter_<profile>.db) don't collide on the same-second timestamp.
     dest = DB_BACKUP_DIR / f"{DB_PATH.stem}_{timestamp}.db"
     import sqlite3
     src_conn = sqlite3.connect(str(DB_PATH))
@@ -699,75 +323,32 @@ def backup_database():
             logger.info(f"Pruned old backup: {f.name}")
 
 
-def prune_screenshots(max_age_days: int = 30):
-    """Delete apply screenshots older than `max_age_days` to bound disk growth."""
-    from applicant.engine import SCREENSHOTS_DIR
-    if not SCREENSHOTS_DIR.exists():
-        return
-    cutoff = datetime.now(UTC).timestamp() - (max_age_days * 86400)
-    removed = 0
-    for f in SCREENSHOTS_DIR.glob("*.png"):
-        if f.stat().st_mtime < cutoff:
-            f.unlink()
-            removed += 1
-    if removed:
-        logger.info(f"Pruned {removed} screenshot(s) older than {max_age_days}d")
-
-
 def main():
     """CLI entry point."""
     init_db()
 
     if len(sys.argv) < 2:
         print("""
-HUNTER - Job Hunting Automation
+HUNTER — Job Hunting Automation
 
 Usage:
-  python main.py hunt       - Scrape jobs; send to Telegram (or print, if unconfigured)
-  python main.py list       - List stored open roles by company (no credentials needed)
-  python main.py apply      - Apply to all approved jobs
-  python main.py followup   - Send follow-up reminders
+  python main.py hunt       - Scrape all sources, filter, store, and print the roles
+  python main.py list       - Print stored open roles, grouped by company
   python main.py stats      - Show statistics
-  python main.py bot        - Run interactive Telegram bot (with scheduler)
-  python main.py bot-all    - Run one bot per profile in HUNTER_PROFILES
   python main.py backup     - Backup the database
         """)
         return
 
     command = sys.argv[1].lower()
-
-    # Supervisor: spawns child `bot` processes, so it validates nothing itself
-    # (each child validates its own profile config on startup).
-    if command == "bot-all":
-        run_all_profiles()
-        return
-
-    commands = {
-        "hunt": hunt,
-        "list": list_jobs,
-        "apply": apply,
-        "followup": followup,
-        "stats": stats,
-        "bot": bot,
-        "backup": None,  # handled separately below
-    }
-
-    if command not in commands:
-        print(f"Unknown command: {command}")
-        print("Available: hunt, list, apply, followup, stats, bot, bot-all, backup")
-        return
-
-    # Validate config before running
-    errors = validate_config(command)
-    if errors:
-        for err in errors:
-            logger.error(f"Config error: {err}")
-        sys.exit(1)
+    commands = {"hunt": hunt, "list": list_jobs, "stats": stats}
 
     if command == "backup":
         backup_database()
-    else:
+    elif command in commands:
         asyncio.run(commands[command]())
+    else:
+        print(f"Unknown command: {command}")
+        print("Available: hunt, list, stats, backup")
 
 
 if __name__ == "__main__":

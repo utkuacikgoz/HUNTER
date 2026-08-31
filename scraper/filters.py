@@ -18,9 +18,7 @@ sponsor checks still apply.
 """
 from __future__ import annotations
 
-import logging
 import re
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -32,10 +30,8 @@ from config.settings import (
     SPONSOR_FRIENDLY_COMPANIES,
 )
 
-logger = logging.getLogger(__name__)
-
 Region = Literal["us", "eu", "emea", "other", "unknown"]
-SponsorStatus = Literal["allowlist", "blocklist", "llm_yes", "llm_no", "unknown"]
+SponsorStatus = Literal["allowlist", "blocklist", "unknown"]
 Verdict = Literal["include", "flag", "drop"]
 
 
@@ -312,42 +308,8 @@ def check_sponsor_allowlist(company: str) -> SponsorStatus:
 
 
 def evaluate_job(job: dict) -> JobVerdict:
-    """Synchronous, pure-Python classifier (no network).
-
-    For LLM-assisted sponsor scoring use `evaluate_job_async`, which takes an
-    `llm_score` callable.
-    """
+    """Classify a scraped job. Pure Python, no network."""
     return _evaluate_sync(job)
-
-
-async def evaluate_job_async(
-    job: dict,
-    *,
-    llm_score: Callable[[str, str], Awaitable[dict]] | None = None,
-) -> JobVerdict:
-    verdict = _evaluate_sync(job)
-    # Only invoke the LLM when we'd otherwise flag for unknown sponsor.
-    if llm_score is None or verdict.sponsor_status != "unknown" or verdict.verdict == "drop":
-        return verdict
-    try:
-        score = await llm_score(job.get("company", ""), job.get("description", ""))
-        decision = (score or {}).get("verdict", "unclear")
-        reason = (score or {}).get("reasons", "")
-    except Exception as e:
-        logger.warning(f"LLM sponsor scoring failed for {job.get('company')!r}: {e}")
-        return verdict
-
-    if decision == "yes":
-        verdict.sponsor_status = "llm_yes"
-        verdict.verdict = "include"
-        verdict.reasons.append(f"llm: {reason}".strip())
-    elif decision == "no":
-        verdict.sponsor_status = "llm_no"
-        verdict.verdict = "drop"
-        verdict.reasons.append(f"llm: {reason}".strip())
-    else:
-        verdict.reasons.append(f"llm unclear: {reason}".strip())
-    return verdict
 
 
 def _evaluate_sync(job: dict) -> JobVerdict:

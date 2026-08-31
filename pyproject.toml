@@ -21,24 +21,15 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.13"
-ignore_missing_imports = true  # playwright / telegram / pytz ship partial or no stubs
-files = ["config", "scraper", "applicant", "prompts", "telegram_bot", "tracker", "main.py"]
-
-[[tool.mypy.overrides]]
-# python-telegram-bot exposes Update/CallbackQuery attributes (effective_chat,
-# message, MaybeInaccessibleMessage.chat_id, ...) as Optional. They are non-None
-# inside our authorized handlers but can't be statically narrowed without a guard
-# on every handler. Relax just these two noise codes here; the rest of the
-# codebase stays fully type-checked. TODO(Phase 3): add handler guards and drop this.
-module = "telegram_bot.bot"
-disable_error_code = ["union-attr", "attr-defined"]
+ignore_missing_imports = true  # playwright ships partial or no stubs
+files = ["config", "scraper", "tracker", "main.py"]
 
 [tool.coverage.run]
 omit = [".venv/*", "tests/*"]
 
 [tool.coverage.report]
 show_missing = true
-# Floor, not a target: the Playwright/network/LLM I/O paths (scrapers, apply
-# engine, generator) can't be unit-tested without live services, so the absolute
-# number is low. This is a ratchet to stop the testable logic from regressing.
+# Floor, not a target: the Playwright/network scraper paths can't be unit-tested
+# without live services, so the absolute number is low. This is a ratchet to stop
+# the testable logic from regressing.
 fail_under = 40
