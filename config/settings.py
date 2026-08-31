@@ -105,11 +105,15 @@ SPONSOR_FRIENDLY_COMPANIES = _csv_set(
     "Hotjar,Elastic,HashiCorp,Sourcegraph,Vercel,Supabase,Linear,Notion,Figma,"
     "Atlassian,Mozilla,Shopify,Discord,Cloudflare,DigitalOcean,n8n,Mattermost,GitHub,"
     "MongoDB,Auth0,Postman,Snyk,Datadog,Miro,Loom,1Password,ClickUp,"
-    "Databricks,Intercom,Dataiku",
+    "Databricks,Intercom",
 )
 # Companies to always drop. Matched against the exact lowercased company string, so list
 # name variants (OpenAI posts as "OpenAI" / "Open AI" / "Open-AI").
-SPONSOR_BLOCKLIST_COMPANIES = _csv_set("SPONSOR_BLOCKLIST_COMPANIES", "canonical,openai,open-ai,open ai")
+SPONSOR_BLOCKLIST_COMPANIES = _csv_set(
+    "SPONSOR_BLOCKLIST_COMPANIES",
+    # Dataiku: does not hire Turkish citizens (owner-verified 2026-08-31).
+    "canonical,openai,open-ai,open ai,dataiku",
+)
 # Off by default: the feed targets remote-from-Turkey roles, where visa
 # sponsorship is not the deciding question — eligibility is decided by the remote
 # location scope instead (see filters.py). Flip on to restore LLM scoring of
@@ -134,14 +138,19 @@ GREENHOUSE_BOARDS = _csv_list(
     # EU/EMEA-focused (hire product in EU/EMEA)
     "monzo,sumup,getyourguide,doctolib,celonis,wolt,n26,hellofresh,trustpilot,"
     "skyscanner,adyen,algolia,raisin,cleo,graphcore,freenow,consensys,"
-    "intercom,dataiku,"
+    "intercom,"
     # YC / well-known startups (region filter drops US-only)
     "brex,gusto,clickhouse,flexport,checkr,mixpanel,webflow,lithic,highnote,"
     # tier-1
     "stripe,datadog,mongodb,cloudflare,figma,gitlab,elastic,postman,"
     "vercel,discord,mozilla,mattermost,remote,"
     # EU/EMEA + global-remote batch, live-verified 2026-07-28
-    "customerio,hightouch,qualio,goodnotes,invisible",
+    "customerio,hightouch,qualio,goodnotes,invisible,"
+    # web3 / DeFi / crypto batch (mostly global-remote teams; the region filter
+    # drops US-locked postings). Added 2026-08-31, NOT yet live-verified — run
+    # `python -m scripts.verify_boards --quiet` and prune DEAD tokens.
+    "uniswaplabs,chainalysis,alchemy,opensea,offchainlabs,chainlinklabs,"
+    "avalabs,circle,ripple,moonpay,eigenlabs,wintermutetrading",
 )
 # US-only-remote giants — scanned last (leftover cap only). Mostly post roles
 # locked to US work authorization, which the filter drops for an overseas candidate.
@@ -157,7 +166,9 @@ LEVER_BOARDS = _csv_list(
     "qonto,vestiairecollective,spotify,toptal,contentsquare,younited,"
     "metabase,finch,"
     # live-verified 2026-06-22
-    "matchgroup,swordhealth",
+    "matchgroup,swordhealth,"
+    # web3/crypto batch, added 2026-08-31, NOT yet live-verified (see GREENHOUSE_BOARDS note)
+    "kraken",
 )
 ASHBY_BOARDS = _csv_list(
     "ASHBY_BOARDS",
@@ -173,7 +184,9 @@ ASHBY_BOARDS = _csv_list(
     "notion,1password,clickup,n8n,linear,zapier,supabase,buffer,"
     # EU/EMEA + global-remote batch, live-verified 2026-07-28
     "elevenlabs,attio,checkly,revenuecat,kong,resend,mazedesign,infisical,"
-    "junction,natter,phantom,assured",
+    "junction,natter,phantom,assured,"
+    # web3/crypto batch, added 2026-08-31, NOT yet live-verified (see GREENHOUSE_BOARDS note)
+    "dune",
 )
 # US-only-remote AI labs / startups — scanned last (leftover cap only).
 ASHBY_US_BOARDS = _csv_list(
@@ -372,7 +385,9 @@ SEARCH_QUERIES = _csv_list(
 # into dead tags (e.g. "senior-product-manager"), so RemoteOK uses these real tags
 # instead. The PM title filter (ROLE_MATCH_KEYWORDS) still trims the broad "product"
 # tag down to manager-level roles.
-REMOTEOK_TAGS = _csv_list("REMOTEOK_TAGS", "product-manager,product")
+# crypto/web3/defi tags widen the net into web3 companies; the title filter still
+# trims every tag down to the target roles.
+REMOTEOK_TAGS = _csv_list("REMOTEOK_TAGS", "product-manager,product,crypto,web3,defi")
 
 # We Work Remotely category RSS feeds (remote-only). The Product feed is broad —
 # the PM title filter trims it to manager-level roles.

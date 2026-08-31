@@ -141,6 +141,17 @@ class TestGetJobs:
         pending = get_pending_jobs()
         assert len(pending) == 2
 
+    def test_get_pending_hides_blocklisted_companies(self, monkeypatch):
+        # Blocklisting is retroactive: a job stored before its company entered
+        # SPONSOR_BLOCKLIST_COMPANIES must stop surfacing in the feed.
+        import tracker.database as db
+        insert_job("PM", "BadCo", "Remote", "", "https://example.com/badco", "greenhouse")
+        insert_job("PM", "GoodCo", "Remote", "", "https://example.com/goodco", "greenhouse")
+        monkeypatch.setattr(db, "SPONSOR_BLOCKLIST_COMPANIES", {"badco"})
+        companies = {j["company"] for j in get_pending_jobs()}
+        assert "GoodCo" in companies
+        assert "BadCo" not in companies
+
     def test_get_pending_respects_limit(self):
         for i in range(10):
             insert_job(f"PM{i}", "Co", "NY", "", f"https://example.com/lim{i}", "linkedin")

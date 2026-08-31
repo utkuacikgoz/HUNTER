@@ -2,7 +2,7 @@ import re
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
-from config.settings import DB_PATH, FOLLOWUP_DAYS
+from config.settings import DB_PATH, FOLLOWUP_DAYS, SPONSOR_BLOCKLIST_COMPANIES
 
 
 def get_connection():
@@ -289,7 +289,12 @@ def get_pending_jobs(limit=50):
                LIMIT ?""",  # nosec B608 — the only interpolation, {acted}, is built from the hardcoded _ACTED_STATUSES literal above; no user input reaches this query
             (limit,),
         ).fetchall()
-        return [dict(r) for r in rows]
+        # Blocklisted companies never surface, even if they were stored before
+        # the company was blocklisted (the verdict column is per-scrape-time).
+        return [
+            dict(r) for r in rows
+            if (r["company"] or "").strip().lower() not in SPONSOR_BLOCKLIST_COMPANIES
+        ]
     finally:
         conn.close()
 
