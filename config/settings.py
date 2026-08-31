@@ -146,11 +146,10 @@ GREENHOUSE_BOARDS = _csv_list(
     "vercel,discord,mozilla,mattermost,remote,"
     # EU/EMEA + global-remote batch, live-verified 2026-07-28
     "customerio,hightouch,qualio,goodnotes,invisible,"
-    # web3 / DeFi / crypto batch (mostly global-remote teams; the region filter
-    # drops US-locked postings). Added 2026-08-31, NOT yet live-verified — run
-    # `python -m scripts.verify_boards --quiet` and prune DEAD tokens.
-    "uniswaplabs,chainalysis,alchemy,opensea,offchainlabs,chainlinklabs,"
-    "avalabs,circle,ripple,moonpay,eigenlabs,wintermutetrading",
+    # web3 / DeFi / crypto batch (global-remote teams; the region filter drops
+    # US-locked postings). Live-verified 2026-08-31; the rest of the original
+    # batch 404'd (those companies are no longer on Greenhouse) and was pruned.
+    "ripple",
 )
 # US-only-remote giants — scanned last (leftover cap only). Mostly post roles
 # locked to US work authorization, which the filter drops for an overseas candidate.
@@ -166,9 +165,7 @@ LEVER_BOARDS = _csv_list(
     "qonto,vestiairecollective,spotify,toptal,contentsquare,younited,"
     "metabase,finch,"
     # live-verified 2026-06-22
-    "matchgroup,swordhealth,"
-    # web3/crypto batch, added 2026-08-31, NOT yet live-verified (see GREENHOUSE_BOARDS note)
-    "kraken",
+    "matchgroup,swordhealth",
 )
 ASHBY_BOARDS = _csv_list(
     "ASHBY_BOARDS",
@@ -185,8 +182,10 @@ ASHBY_BOARDS = _csv_list(
     # EU/EMEA + global-remote batch, live-verified 2026-07-28
     "elevenlabs,attio,checkly,revenuecat,kong,resend,mazedesign,infisical,"
     "junction,natter,phantom,assured,"
-    # web3/crypto batch, added 2026-08-31, NOT yet live-verified (see GREENHOUSE_BOARDS note)
-    "dune",
+    # web3/crypto batch. dune live-verified 2026-08-31; the others are best-guess
+    # tokens for crypto companies that left Greenhouse — run
+    # `python -m scripts.verify_boards --quiet` and prune any DEAD ones.
+    "dune,opensea,alchemy,uniswaplabs,kraken",
 )
 # US-only-remote AI labs / startups — scanned last (leftover cap only).
 ASHBY_US_BOARDS = _csv_list(
@@ -194,10 +193,12 @@ ASHBY_US_BOARDS = _csv_list(
     "perplexity,cursor,character,sierra,decagon,drata,abridge,speak,suno,crusoe",
 )
 # Recruitee boards — subdomain token (https://{token}.recruitee.com/api/offers/).
-RECRUITEE_BOARDS = _csv_list("RECRUITEE_BOARDS", "bunq,sendcloud")
+# sendcloud pruned 2026-08-31 (404 — board gone).
+RECRUITEE_BOARDS = _csv_list("RECRUITEE_BOARDS", "bunq")
 # SmartRecruiters company identifiers (case-sensitive, as in their posting API
 # https://api.smartrecruiters.com/v1/companies/{id}/postings).
-SMARTRECRUITERS_COMPANIES = _csv_list("SMARTRECRUITERS_COMPANIES", "Visa")
+# Visa pruned 2026-08-31 (board returns 0 postings).
+SMARTRECRUITERS_COMPANIES = _csv_list("SMARTRECRUITERS_COMPANIES", "")
 # Catalog sources list every role on a board; keep only titles containing one of
 # these (case-insensitive substring). The target is deliberately narrow — the
 # candidate wants exactly Head of Product and Senior Product Manager roles, not
