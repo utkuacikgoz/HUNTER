@@ -145,7 +145,7 @@ python3 -m venv .venv
 Quality gates (mirror CI in [.github/workflows/ci.yml](.github/workflows/ci.yml)):
 
 ```bash
-.venv/bin/python -m pytest -q     # 395 tests
+.venv/bin/python -m pytest -q     # 396 tests
 .venv/bin/ruff check .            # lint
 .venv/bin/mypy                    # type check (files configured in pyproject.toml)
 ```
