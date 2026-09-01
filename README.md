@@ -1,27 +1,29 @@
 # HUNTER
 
-Personal job-hunting automation for Product Manager roles (Python 3.12, asyncio).
+Personal job-hunting automation (Python 3.13, asyncio). Runs entirely on your
+machine — no accounts, no API keys, no deployment.
 
-HUNTER scrapes PM postings from several sources, filters them by region /
-remote / visa-sponsor signals, pushes candidates to a Telegram bot for human
-review, then (optionally) auto-applies to approved jobs with Playwright and
-Claude-generated cover letters. All state lives in a local SQLite database.
+HUNTER lists the jobs and companies hiring **Head of Product / Senior Product
+Manager, remote only**, that a Turkey-based candidate with no US/EU/UK work
+permit can actually take: remote roles locked to US/Canada, the EU, or the UK
+are dropped; worldwide/EMEA/Turkey scopes are kept. Results print to the
+terminal and are stored in a local SQLite database.
 
 ```
-scrape → filter/classify → store → Telegram review → apply → track/follow-up
+scrape → filter/classify → store → print
 ```
 
 ## Features
 
-- **Multiple sources** — Greenhouse / Lever / Ashby ATS catalogs and Wellfound
-  (Playwright), We Work Remotely / RemoteOK (JSON/RSS, no browser).
-- **Smart filtering** — role-title matching, region/remote gating, and an
-  LLM sponsor-likelihood classifier; external text is sanitized before it ever
-  reaches a prompt.
-- **Human-in-the-loop** — review candidates in Telegram; approve to auto-apply.
-- **Auto-apply** — Playwright fills applications with Claude-written cover
-  letters (falls back to a template when no API key is set).
-- **Multi-profile** — run several independent bots from one checkout
+- **Multiple sources** — Greenhouse / Lever / Ashby / Recruitee / SmartRecruiters
+  ATS catalogs, We Work Remotely and RemoteOK (JSON/RSS, no browser), and
+  Wellfound (Playwright).
+- **Eligibility filtering** — role-title matching, remote gating, and a
+  remote-scope check that drops roles locked to a jurisdiction you can't work from.
+- **Company blocklist** — companies you never want to see again stay out of the
+  feed, retroactively.
+- **Hiring velocity** — companies posting several roles in the window rank first.
+- **Multi-profile** — run several independent hunts from one checkout
   (`HUNTER_PROFILE=<name>` overlays `.env.<name>`).
 
 ## Quick start
@@ -29,62 +31,56 @@ scrape → filter/classify → store → Telegram review → apply → track/fol
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
-.venv/bin/playwright install chromium        # needed for scrape/apply paths
+.venv/bin/playwright install chromium        # only for the Wellfound scraper
 
-cp .env.example .env                          # then fill in your values
-.venv/bin/python main.py stats               # DB-only, safe smoke test
-.venv/bin/python main.py hunt                # scrape + push to Telegram (needs creds)
+.venv/bin/python main.py hunt                # scrape, filter, store, print
+.venv/bin/python main.py list                # re-print stored roles anytime
 ```
+
+Set `ENABLE_BROWSER_SCRAPERS=false` to run API-only and skip the Chromium install.
 
 ## Commands
 
 `main.py` is the entry point. Subcommands:
 
-| Command    | What it does                                                            |
-| ---------- | ----------------------------------------------------------------------- |
-| `hunt`     | Scrape all sources, filter, and push candidates to Telegram             |
-| `apply`    | Auto-apply to approved jobs                                             |
-| `followup` | Send follow-ups on applied jobs                                         |
-| `stats`    | Print DB stats (no credentials required)                                |
-| `bot`      | Run the Telegram bot + APScheduler cron (daily hunt, follow-up, backup) |
-| `backup`   | Back up the SQLite DB                                                   |
+| Command  | What it does                                                |
+| -------- | ----------------------------------------------------------- |
+| `hunt`   | Scrape all sources, filter, store, and print the roles       |
+| `list`   | Print stored open roles, grouped by company                  |
+| `stats`  | Print DB stats                                               |
+| `backup` | Back up the SQLite DB                                        |
 
-`stats`, `backup`, and `followup` need no credentials — use them to smoke-test.
+No command needs credentials — there are none.
 
 ## Configuration
 
-All settings are environment variables, centralized in
-[config/settings.py](config/settings.py) (the single source of truth — don't
-call `os.getenv` elsewhere). [.env.example](.env.example) is the template, split
-into **SECRETS/PII** (never committed) and **non-secret CONFIG** sections.
-
-**Secrets** (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ANTHROPIC_API_KEY`,
-`RESUME_TEXT`, all `APPLICANT_*` PII) go in `.env` locally and `fly secrets set`
-in production. Everything else is non-secret config. `validate_config(command)`
-gates each subcommand on the vars it actually needs.
-
-See [CLAUDE.md](CLAUDE.md) for the full config reference, profiles, and
-architecture notes.
-
-## Deployment
-
-Runs on [Fly.io](https://fly.io) — non-secret config lives in `[env]` in
-[fly.toml](fly.toml); secrets are set with `fly secrets set …` (the exact
-command is documented at the top of `fly.toml`).
-
-## Quality gates
-
-CI (Python 3.12) installs from [requirements.lock](requirements.lock) and runs
-lint → type check → security lint → dependency audit → tests, plus a full-history
-secret scan:
+All settings are environment variables with defaults in
+[config/settings.py](config/settings.py); [.env.example](.env.example) is the
+template.
 
 ```bash
-.venv/bin/python -m pytest -q --cov=.   # tests + coverage (fail_under = 40 ratchet)
-.venv/bin/ruff check .                   # lint
-.venv/bin/mypy                           # type check
-.venv/bin/bandit -q -r . -ll -x ./tests  # security lint (medium+)
-.venv/bin/pip-audit -r requirements.lock # dependency CVE audit
+cp .env.example .env
 ```
 
-The `coverage fail_under = 40` floor is a regression ratchet, not a target —
-the Playwright/network/LLM I/O paths can't be unit-tested without live services.
+The knobs you'll actually reach for: `ROLE_MATCH_KEYWORDS` (which titles count),
+`SPONSOR_BLOCKLIST_COMPANIES` (companies to hide), `MAX_JOBS_PER_DAY`, and the
+`*_BOARDS` lists of ATS board tokens.
+
+## Maintenance
+
+ATS board tokens drift as companies churn or switch ATS. Check them with:
+
+```bash
+.venv/bin/python -m scripts.verify_boards --quiet   # prints DEAD / no-PM boards
+```
+
+`DEAD` means the board is gone — prune the token. `no-PM` just means that board
+has no matching opening today, which is normal.
+
+## Development
+
+```bash
+.venv/bin/python -m pytest -q     # tests
+.venv/bin/ruff check .            # lint
+.venv/bin/mypy                    # type check
+```

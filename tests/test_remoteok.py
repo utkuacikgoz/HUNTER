@@ -19,8 +19,12 @@ API = [
         "position": "Junior Product Manager", "slug": "gamma-jpm", "company": "Gamma",
         "location": "Worldwide",
     },
-    {  # PM with no residence restriction → plain "Remote"
+    {  # out-of-target PM level → filtered out by the narrow role title filter
         "position": "Group Product Manager", "slug": "delta-gpm", "company": "Delta",
+        "location": "", "salary_min": 95000,
+    },
+    {  # target role with no residence restriction → plain "Remote"
+        "position": "Head of Product", "slug": "epsilon-hop", "company": "Epsilon",
         "location": "", "salary_min": 90000,
     },
 ]
@@ -45,8 +49,8 @@ class TestRemoteOK:
         _patch(monkeypatch, API)
         jobs = await RemoteOKScraper().scrape(max_results=10)
 
-        # Engineer + junior roles dropped; only senior PM roles survive.
-        assert [j["title"] for j in jobs] == ["Senior Product Manager", "Group Product Manager"]
+        # Engineer + junior + out-of-target roles dropped; only target roles survive.
+        assert [j["title"] for j in jobs] == ["Senior Product Manager", "Head of Product"]
 
         spm = jobs[0]
         assert spm["company"] == "Acme"

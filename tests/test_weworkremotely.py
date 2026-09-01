@@ -17,7 +17,7 @@ RSS = """<?xml version="1.0" encoding="UTF-8"?>
     <description>x</description>
   </item>
   <item>
-    <title>Gamma: Product Lead (Remote)</title>
+    <title>Gamma: Head of Product (Remote)</title>
     <region>USA Only</region>
     <link>https://weworkremotely.com/remote-jobs/gamma-pl</link>
     <description>y</description>
@@ -41,8 +41,8 @@ class TestWeWorkRemotely:
         _patch_get_text(monkeypatch, src, RSS)
 
         jobs = await src.scrape()
-        # Engineer role filtered out by the PM title filter.
-        assert [j["title"] for j in jobs] == ["Senior Product Manager", "Product Lead (Remote)"]
+        # Engineer role filtered out by the role title filter.
+        assert [j["title"] for j in jobs] == ["Senior Product Manager", "Head of Product (Remote)"]
         assert jobs[0]["company"] == "Acme"            # split on "Company: Role"
         assert jobs[0]["location"] == "Remote - Europe"
         assert jobs[0]["url"].endswith("/acme-spm")

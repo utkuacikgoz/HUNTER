@@ -2,7 +2,7 @@ import re
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
-from config.settings import DB_PATH, FOLLOWUP_DAYS
+from config.settings import DB_PATH, FOLLOWUP_DAYS, SPONSOR_BLOCKLIST_COMPANIES
 
 
 def get_connection():
@@ -89,15 +89,14 @@ def init_db():
             applied_at TEXT,
             last_followup_at TEXT,
             followup_count INTEGER DEFAULT 0,
-            notes TEXT,
-            cover_letter TEXT
+            notes TEXT
         );
 
         CREATE TABLE IF NOT EXISTS application_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             job_id INTEGER NOT NULL,
             action TEXT NOT NULL,
-            -- action: scraped, sent_to_telegram, approved, rejected, applied, followup_sent, status_changed
+            -- action: scraped, approved, rejected, applied, followup_sent, status_changed
             detail TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             FOREIGN KEY (job_id) REFERENCES jobs(id)
@@ -289,7 +288,12 @@ def get_pending_jobs(limit=50):
                LIMIT ?""",  # nosec B608 — the only interpolation, {acted}, is built from the hardcoded _ACTED_STATUSES literal above; no user input reaches this query
             (limit,),
         ).fetchall()
-        return [dict(r) for r in rows]
+        # Blocklisted companies never surface, even if they were stored before
+        # the company was blocklisted (the verdict column is per-scrape-time).
+        return [
+            dict(r) for r in rows
+            if (r["company"] or "").strip().lower() not in SPONSOR_BLOCKLIST_COMPANIES
+        ]
     finally:
         conn.close()
 
@@ -337,15 +341,6 @@ def reject_job(job_id):
 
 def mark_applied(job_id):
     update_job_status(job_id, "applied")
-
-
-def set_cover_letter(job_id, cover_letter):
-    conn = get_connection()
-    try:
-        conn.execute("UPDATE jobs SET cover_letter = ? WHERE id = ?", (cover_letter, job_id))
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def get_jobs_needing_followup():

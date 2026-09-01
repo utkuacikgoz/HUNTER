@@ -37,7 +37,6 @@ with mock.patch.dict(os.environ, {"DB_PATH": _tmp.name}):
         record_followup,
         record_scraper_run,
         reject_job,
-        set_cover_letter,
         should_skip_scraper,
         update_job_status,
     )
@@ -140,6 +139,17 @@ class TestGetJobs:
         insert_job("PM2", "Co", "NY", "", "https://example.com/p2", "indeed")
         pending = get_pending_jobs()
         assert len(pending) == 2
+
+    def test_get_pending_hides_blocklisted_companies(self, monkeypatch):
+        # Blocklisting is retroactive: a job stored before its company entered
+        # SPONSOR_BLOCKLIST_COMPANIES must stop surfacing in the feed.
+        import tracker.database as db
+        insert_job("PM", "BadCo", "Remote", "", "https://example.com/badco", "greenhouse")
+        insert_job("PM", "GoodCo", "Remote", "", "https://example.com/goodco", "greenhouse")
+        monkeypatch.setattr(db, "SPONSOR_BLOCKLIST_COMPANIES", {"badco"})
+        companies = {j["company"] for j in get_pending_jobs()}
+        assert "GoodCo" in companies
+        assert "BadCo" not in companies
 
     def test_get_pending_respects_limit(self):
         for i in range(10):
@@ -257,14 +267,6 @@ class TestStats:
         assert s["pending"] == 0
         assert s["applied_this_week"] == 1
         assert s["applied_this_month"] == 1
-
-
-class TestCoverLetter:
-    def test_set_cover_letter(self):
-        job_id = insert_job("PM", "Co", "NY", "", "https://example.com/cl1", "linkedin")
-        set_cover_letter(job_id, "Dear Hiring Manager...")
-        job = get_job_by_id(job_id)
-        assert job["cover_letter"] == "Dear Hiring Manager..."
 
 
 class TestLogAction:
@@ -483,7 +485,7 @@ class TestDedupSuppression:
 
     def test_twin_under_different_url_suppressed_after_skip(self):
         a = insert_job("Product Manager", "Acme", "Remote", "", "https://a.com/1", "greenhouse")
-        reject_job(a)  # the Telegram "Skip" path sets status='rejected'
+        reject_job(a)  # user skipped it: status='rejected'
         b = insert_job("Product Manager", "Acme", "Remote", "", "https://b.com/2", "lever")
         assert b is not None  # twin is still stored (different URL)
         pending_ids = {j["id"] for j in get_pending_jobs()}

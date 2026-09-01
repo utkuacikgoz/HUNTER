@@ -1,4 +1,3 @@
-import logging
 import os
 from pathlib import Path
 
@@ -9,51 +8,24 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # --- Profiles ---
-# A profile lets one checkout run as more than one independent bot (e.g. Utku's
-# PM hunt vs. a friend's marketing hunt) without a second deployment. Set
-# HUNTER_PROFILE=<name> in the real environment and drop a `.env.<name>` overlay
-# next to `.env` (or on the data volume in prod) — its values win via override.
-# The default (empty) profile is the original single-bot behavior, untouched.
+# A profile lets one checkout run as more than one independent hunt (e.g. Utku's
+# PM hunt vs. a friend's marketing hunt). Set HUNTER_PROFILE=<name> and drop a
+# `.env.<name>` overlay next to `.env` — its values win via override. Give the
+# profile its own DB_PATH so the two never share state. The default (empty)
+# profile is the original single-hunt behavior, untouched.
 HUNTER_PROFILE = os.getenv("HUNTER_PROFILE", "").strip()
 if HUNTER_PROFILE:
-    for _overlay in (BASE_DIR / f".env.{HUNTER_PROFILE}", Path("/data") / f".env.{HUNTER_PROFILE}"):
-        if _overlay.exists():
-            load_dotenv(_overlay, override=True)
-
-# Comma-separated profile names for the `bot-all` supervisor (see main.py). Unlike
-# other CSV settings, an EMPTY entry is meaningful — it denotes the default
-# (no-profile) bot — so we keep blanks: "" → [""], ",friend" → ["", "friend"].
-_raw_profiles = os.getenv("HUNTER_PROFILES")
-HUNTER_PROFILES = [p.strip() for p in _raw_profiles.split(",")] if _raw_profiles else [""]
+    _overlay = BASE_DIR / f".env.{HUNTER_PROFILE}"
+    if _overlay.exists():
+        load_dotenv(_overlay, override=True)
 
 # --- Logging ---
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
-# --- Telegram ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-
-# --- LinkedIn ---
-LINKEDIN_SESSION_COOKIE = os.getenv("LINKEDIN_SESSION_COOKIE", "")
-
-# --- Anthropic Claude ---
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-# Model for form answers (submitted in applications — keep quality up). Override via env.
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
-# Sponsor scoring is a strict yes/no/unclear JSON classifier run on most flagged jobs every
-# hunt — the textbook cheap-model task. Haiku is ~3x cheaper than Sonnet here. Override via env.
-SPONSOR_MODEL = os.getenv("SPONSOR_MODEL", "claude-haiku-4-5")
-# Cover letters represent you to employers and are low-volume (once per apply), so
-# use the strongest model by default. Override via env.
-COVER_LETTER_MODEL = os.getenv("COVER_LETTER_MODEL", "claude-opus-5")
-
 # --- Job preferences ---
 LOCATIONS = [loc.strip() for loc in os.getenv("LOCATIONS", "EMEA,Remote,US").split(",") if loc.strip()]
 MAX_JOBS_PER_DAY = int(os.getenv("MAX_JOBS_PER_DAY", "80"))
-# How many jobs to classify concurrently. The sponsor-scoring LLM call is a network
-# round-trip, so scoring a batch in parallel cuts the classify phase several-fold.
-CLASSIFY_CONCURRENCY = int(os.getenv("CLASSIFY_CONCURRENCY", "8"))
-# How many of SEARCH_QUERIES to run per scrape (0 = all). Previously hardcoded to 3.
+# How many of SEARCH_QUERIES to run per scrape (0 = all).
 MAX_QUERIES_PER_RUN = int(os.getenv("MAX_QUERIES_PER_RUN", "0"))
 # Max roles to pull from a SINGLE source per run. Set above MAX_JOBS_PER_DAY so a
 # catalog source keeps scanning boards past the day's quota (more boards reached =
@@ -83,33 +55,37 @@ def _bool(env_name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "y"}
 
 
-# --- Region / sponsor filtering ---
+# --- Region / eligibility filtering ---
 REGION_ALLOWLIST = _csv_set("REGION_ALLOWLIST", "us,eu,emea")
-REMOTE_REQUIRED = os.getenv("REMOTE_REQUIRED", "true").strip().lower() in {"1", "true", "yes", "y"}
+REMOTE_REQUIRED = _bool("REMOTE_REQUIRED", True)
 # Exempt freelance/contract roles from the REMOTE_REQUIRED gate. With both on, the feed
 # reads "remote OR freelance": an on-site contract gig in the candidate's own city
 # survives, an on-site permanent role does not. Detection is text-only, title-first —
 # see scraper/filters.detect_freelance. No effect when REMOTE_REQUIRED is off (the gate
-# it modifies is already open). Only the remote gate is exempted: region, country-lock
-# and sponsor checks still apply.
+# it modifies is already open). Only the remote gate is exempted: region and lock
+# checks still apply.
 ALLOW_ONSITE_FREELANCE = _bool("ALLOW_ONSITE_FREELANCE", False)
-# Regions where the candidate can actually work (no sponsorship/relocation needed).
-# A remote role explicitly LOCKED to countries outside these regions (e.g.
-# "Remote - US only", "100% Remote (US/Canada)") is dropped — it won't accept an
-# overseas candidate even at a sponsor-friendly company. Empty disables the check.
-CANDIDATE_WORK_REGIONS = _csv_set("CANDIDATE_WORK_REGIONS", "emea,eu")
+# The candidate works remotely from Turkey with no US/EU/UK work permit. A remote
+# role explicitly LOCKED to a region they can't work from ("Remote - US only",
+# "Remote (EU)", "Remote - Germany", "100% Remote (US/Canada)") is dropped — it
+# requires residence / work authorization there, whatever the company's visa
+# stance. Scopes that include Turkey (worldwide/global, EMEA, MENA, Turkey
+# itself) stay in. See scraper/filters.detect_ineligible_remote_lock.
 SPONSOR_FRIENDLY_COMPANIES = _csv_set(
     "SPONSOR_FRIENDLY_COMPANIES",
     "Stripe,GitLab,Automattic,Spotify,Klarna,Wise,Remote,Deel,Toptal,Doist,Buffer,Zapier,"
     "Hotjar,Elastic,HashiCorp,Sourcegraph,Vercel,Supabase,Linear,Notion,Figma,"
     "Atlassian,Mozilla,Shopify,Discord,Cloudflare,DigitalOcean,n8n,Mattermost,GitHub,"
     "MongoDB,Auth0,Postman,Snyk,Datadog,Miro,Loom,1Password,ClickUp,"
-    "Databricks,Intercom,Dataiku",
+    "Databricks,Intercom",
 )
 # Companies to always drop. Matched against the exact lowercased company string, so list
 # name variants (OpenAI posts as "OpenAI" / "Open AI" / "Open-AI").
-SPONSOR_BLOCKLIST_COMPANIES = _csv_set("SPONSOR_BLOCKLIST_COMPANIES", "canonical,openai,open-ai,open ai")
-ENABLE_LLM_SPONSOR_SCORING = os.getenv("ENABLE_LLM_SPONSOR_SCORING", "true").strip().lower() in {"1", "true", "yes", "y"}
+SPONSOR_BLOCKLIST_COMPANIES = _csv_set(
+    "SPONSOR_BLOCKLIST_COMPANIES",
+    # Dataiku: does not hire Turkish citizens (owner-verified 2026-08-31).
+    "canonical,openai,open-ai,open ai,dataiku",
+)
 
 # --- ATS catalog sources (Greenhouse / Lever / Ashby) ---
 # Values are board *tokens* (not display names). Defaults are live-verified
@@ -118,9 +94,8 @@ ENABLE_LLM_SPONSOR_SCORING = os.getenv("ENABLE_LLM_SPONSOR_SCORING", "true").str
 # Boards are scanned in two tiers: the PRIORITY list below (EU/EMEA/global-remote,
 # sponsor-friendly) is scanned first — rotated daily so its tail gets coverage — and
 # the *_US_BOARDS list (US-only-remote giants) is only reached when the per-run cap
-# isn't already filled. This keeps the review queue weighted toward roles an
-# overseas, sponsorship-needing candidate can actually take. Tokens live-verified
-# 2026-06-04..22.
+# isn't already filled. This keeps the feed weighted toward roles an overseas
+# candidate can actually take. Tokens live-verified 2026-06-04..22.
 GREENHOUSE_BOARDS = _csv_list(
     "GREENHOUSE_BOARDS",
     # tier-2/3 (fintech / crypto / marketplace / saas)
@@ -129,14 +104,18 @@ GREENHOUSE_BOARDS = _csv_list(
     # EU/EMEA-focused (hire product in EU/EMEA)
     "monzo,sumup,getyourguide,doctolib,celonis,wolt,n26,hellofresh,trustpilot,"
     "skyscanner,adyen,algolia,raisin,cleo,graphcore,freenow,consensys,"
-    "intercom,dataiku,"
+    "intercom,"
     # YC / well-known startups (region filter drops US-only)
     "brex,gusto,clickhouse,flexport,checkr,mixpanel,webflow,lithic,highnote,"
     # tier-1
     "stripe,datadog,mongodb,cloudflare,figma,gitlab,elastic,postman,"
     "vercel,discord,mozilla,mattermost,remote,"
     # EU/EMEA + global-remote batch, live-verified 2026-07-28
-    "customerio,hightouch,qualio,goodnotes,invisible",
+    "customerio,hightouch,qualio,goodnotes,invisible,"
+    # web3 / DeFi / crypto batch (global-remote teams; the region filter drops
+    # US-locked postings). Live-verified 2026-08-31; the rest of the original
+    # batch 404'd (those companies are no longer on Greenhouse) and was pruned.
+    "ripple",
 )
 # US-only-remote giants — scanned last (leftover cap only). Mostly post roles
 # locked to US work authorization, which the filter drops for an overseas candidate.
@@ -168,7 +147,10 @@ ASHBY_BOARDS = _csv_list(
     "notion,1password,clickup,n8n,linear,zapier,supabase,buffer,"
     # EU/EMEA + global-remote batch, live-verified 2026-07-28
     "elevenlabs,attio,checkly,revenuecat,kong,resend,mazedesign,infisical,"
-    "junction,natter,phantom,assured",
+    "junction,natter,phantom,assured,"
+    # web3/crypto batch, live-verified 2026-08-31 (uniswaplabs/kraken guesses
+    # came back dead and were pruned).
+    "dune,opensea,alchemy",
 )
 # US-only-remote AI labs / startups — scanned last (leftover cap only).
 ASHBY_US_BOARDS = _csv_list(
@@ -176,21 +158,21 @@ ASHBY_US_BOARDS = _csv_list(
     "perplexity,cursor,character,sierra,decagon,drata,abridge,speak,suno,crusoe",
 )
 # Recruitee boards — subdomain token (https://{token}.recruitee.com/api/offers/).
-RECRUITEE_BOARDS = _csv_list("RECRUITEE_BOARDS", "bunq,sendcloud")
+# sendcloud pruned 2026-08-31 (404 — board gone).
+RECRUITEE_BOARDS = _csv_list("RECRUITEE_BOARDS", "bunq")
 # SmartRecruiters company identifiers (case-sensitive, as in their posting API
 # https://api.smartrecruiters.com/v1/companies/{id}/postings).
-SMARTRECRUITERS_COMPANIES = _csv_list("SMARTRECRUITERS_COMPANIES", "Visa")
+# Visa pruned 2026-08-31 (board returns 0 postings).
+SMARTRECRUITERS_COMPANIES = _csv_list("SMARTRECRUITERS_COMPANIES", "")
 # Catalog sources list every role on a board; keep only titles containing one of
-# these (case-insensitive substring). Anchored on the role function (…manager /
-# lead / owner / head / director / vp of product) so "Staff Product Designer" and
-# similar non-PM roles drop out. Override via env for a different target.
+# these (case-insensitive substring). Target: Head of Product / Senior Product
+# Manager, widened (2026-08-31, feed ran thin) to the adjacent senior-plus
+# titles — lead/principal/director. Deliberately still excludes bare "product
+# manager", group PM, and product owner. Override via env to retarget.
 ROLE_MATCH_KEYWORDS = _csv_list(
     "ROLE_MATCH_KEYWORDS",
-    "product manager,product management,product lead,lead product manager,"
-    "head of product,product owner,director of product,vp of product,vp product,"
-    "chief product,group product manager,principal product manager,"
-    "senior product manager,staff product manager,technical product manager,"
-    "platform product manager",
+    "head of product,senior product manager,sr product manager,sr. product manager,"
+    "lead product manager,principal product manager,director of product",
 )
 # Titles containing one of these (whole-word match) are dropped even if they also match a
 # ROLE_MATCH_KEYWORD — the candidate wants senior+ roles. Matched word-boundary-safe so
@@ -198,11 +180,11 @@ ROLE_MATCH_KEYWORDS = _csv_list(
 ROLE_EXCLUDE_KEYWORDS = _csv_list(
     "ROLE_EXCLUDE_KEYWORDS",
     "junior,jr,associate,intern,apprentice,working student,graduate,"
-    "entry level,entry-level,trainee,co-op,student",
+    "entry level,entry-level,trainee,co-op,student,"
+    # "Head/Director of Product X" adjacent functions that aren't the PM role itself.
+    "head of product design,head of product marketing,"
+    "director of product design,director of product marketing",
 )
-# Platforms applicant/engine.py can drive a browser to auto-submit. Sources outside this set
-# (RemoteOK / WeWorkRemotely / Recruitee / SmartRecruiters) are apply-link-only.
-AUTO_APPLY_PLATFORMS = {"greenhouse", "lever", "ashby", "wellfound", "linkedin"}
 
 # --- Scraper health / selector overrides ---
 # Comma-separated Playwright selectors tried in order. Add new variants as Wellfound DOM drifts.
@@ -219,9 +201,8 @@ SCRAPER_SKIP_AFTER_ZEROS = int(os.getenv("SCRAPER_SKIP_AFTER_ZEROS", "3"))
 # upstream outage would disable that source permanently (until scraper_health is
 # cleared by hand). 0 restores that old permanent behavior.
 SCRAPER_RETRY_AFTER_DAYS = int(os.getenv("SCRAPER_RETRY_AFTER_DAYS", "3"))
-# Run the browser-based scrapers (RemoteOK, Wellfound — they launch Chromium).
-# Set false to run API-only (no Playwright/Chromium): lighter on RAM, ideal for a
-# co-located profile that never auto-applies. Default true keeps all sources.
+# Run the browser-based scrapers (Wellfound — it launches Chromium). Set false to
+# run API-only (no Playwright/Chromium): lighter and needs no browser install.
 ENABLE_BROWSER_SCRAPERS = _bool("ENABLE_BROWSER_SCRAPERS", True)
 
 # --- Hiring velocity (DB-only) ---
@@ -230,20 +211,15 @@ VELOCITY_WINDOW_DAYS = int(os.getenv("VELOCITY_WINDOW_DAYS", "14"))
 # Companies with at least this many distinct roles in the window get the 🔥 badge.
 VELOCITY_HOT_THRESHOLD = int(os.getenv("VELOCITY_HOT_THRESHOLD", "3"))
 # When true, rank pending jobs from hot companies above the rest.
-VELOCITY_BOOST_RANK = os.getenv("VELOCITY_BOOST_RANK", "true").strip().lower() in {"1", "true", "yes", "y"}
+VELOCITY_BOOST_RANK = _bool("VELOCITY_BOOST_RANK", True)
 
-# Chromium launch args shared by every headless-browser call site (the scrapers
-# in scraper/base.py and the apply engine in applicant/engine.py). Keep this the
-# single source of truth so both stay in sync.
-#   --disable-dev-shm-usage: the container's /dev/shm is only 64MB; without this
-#     Chromium overruns it and the renderer crashes/OOMs (root cause of the bot
-#     dying and being restarted). Spills to /tmp instead. This is what makes a
-#     sub-1GB VM safe — do not drop it.
+# Chromium launch args shared by every headless-browser call site.
+#   --disable-dev-shm-usage: small /dev/shm environments crash the renderer
+#     without it (spills to /tmp instead).
 #   --disable-gpu / --disable-extensions / --disable-background-networking: trim
-#     memory and startup work; there is no GPU or extension in this VM anyway.
-# NOTE: intentionally NOT --no-sandbox — Chromium launches fine as the non-root
-# `hunter` user, and disabling the sandbox would weaken isolation while browsing
-# untrusted job pages. Only add it if a sandbox launch error actually appears.
+#     memory and startup work.
+# NOTE: intentionally NOT --no-sandbox — disabling the sandbox would weaken
+# isolation while browsing untrusted job pages.
 CHROMIUM_LAUNCH_ARGS = [
     "--disable-blink-features=AutomationControlled",
     "--disable-dev-shm-usage",
@@ -265,163 +241,30 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 ]
 
-# --- Schedule ---
-# All times are in the scheduler's timezone, which is the container's TZ. In
-# production TZ is unset, so these hours are UTC. If the machine is scaled to zero
-# outside an active window (see .github/workflows/hunter-window.yml), every job
-# below MUST fall inside that window or it silently never fires — the in-memory
-# jobstore does not replay runs missed while the process was stopped.
-HUNT_SCHEDULE_HOUR = int(os.getenv("HUNT_SCHEDULE_HOUR", "9"))
-HUNT_SCHEDULE_MINUTE = int(os.getenv("HUNT_SCHEDULE_MINUTE", "0"))
-FOLLOWUP_SCHEDULE_HOUR = int(os.getenv("FOLLOWUP_SCHEDULE_HOUR", "10"))
-# Backup + screenshot prune default to the small hours (fine when always-on);
-# override into the active window when the machine sleeps overnight.
-BACKUP_SCHEDULE_HOUR = int(os.getenv("BACKUP_SCHEDULE_HOUR", "3"))
-BACKUP_SCHEDULE_MINUTE = int(os.getenv("BACKUP_SCHEDULE_MINUTE", "0"))
-PRUNE_SCHEDULE_HOUR = int(os.getenv("PRUNE_SCHEDULE_HOUR", "3"))
-PRUNE_SCHEDULE_MINUTE = int(os.getenv("PRUNE_SCHEDULE_MINUTE", "30"))
-
-# --- Apply engine ---
-# Master switch for the whole auto-apply path. When false, the Telegram review UI
-# drops Approve/Apply and /apply refuses — the user applies manually. Used by
-# profiles that only want sourcing (+ optional cover letters, see below). Default
-# true keeps the original behavior.
-ENABLE_AUTO_APPLY = _bool("ENABLE_AUTO_APPLY", True)
-# Offer on-demand cover-letter generation in the review UI (the 📄 Cover Letter
-# button shown when ENABLE_AUTO_APPLY is off). Set false for a pure job-feed
-# profile (Skip / View Job only); flip true later to turn the feature on. Default
-# true. (Has no effect while ENABLE_AUTO_APPLY is on — that path applies directly.)
-ENABLE_COVER_LETTERS = _bool("ENABLE_COVER_LETTERS", True)
-# When true, structured ATS appliers fill the form but DO NOT click submit (they
-# screenshot for manual review). Flip on to safely validate form-filling against
-# real postings before letting the bot submit for you.
-APPLY_DRY_RUN = os.getenv("APPLY_DRY_RUN", "false").strip().lower() in {"1", "true", "yes", "y"}
-# Max jobs a single /apply run will attempt, so a bulk apply can't burn through
-# every approved job (and per-company application limits) at once. 0 = no cap.
-MAX_APPLIES_PER_RUN = int(os.getenv("MAX_APPLIES_PER_RUN", "10"))
-
-# --- Applicant answers ---
-# Canned answers the apply engine fills into forms, and the candidate facts the
-# dropdown chooser reasons from. PII comes from env (fly secrets in prod), never
-# from source. Kept here with the rest of the config — nothing outside this file
-# reads os.getenv.
-COMMON_ANSWERS = {
-    "salary": os.getenv("ANSWER_SALARY", "$80,000 - $120,000 depending on total compensation package"),
-    "availability": os.getenv("ANSWER_AVAILABILITY", "Available to start within 2-4 weeks"),
-    "work_authorization": os.getenv(
-        "ANSWER_WORK_AUTH",
-        "Based in Turkey, authorized to work in EMEA. Open to relocation and can work US timezone hours.",
-    ),
-    "remote": os.getenv(
-        "ANSWER_REMOTE",
-        "Yes, I have extensive experience working remotely with distributed teams "
-        "across Turkey, UAE, KSA, and the US.",
-    ),
-    "years_experience": os.getenv("ANSWER_YOE", "8+"),
-    # Sensitive yes/no questions — answered from the candidate's known situation
-    # (Turkey-based: needs sponsorship). Used to pick dropdown options in the
-    # structured ATS appliers. "yes"/"no" are matched against option text.
-    "requires_sponsorship": os.getenv("ANSWER_REQUIRES_SPONSORSHIP", "yes"),
-    "work_authorized": os.getenv("ANSWER_WORK_AUTHORIZED", "no"),
-    "location": os.getenv("ANSWER_LOCATION", "Istanbul, Turkey"),
-    # Lever (and some Ashby boards) require current employer / title as their own
-    # fields. Left empty by default: inventing an employer on an application is
-    # never acceptable, so an unset value makes the apply stop and hand off to a
-    # manual apply rather than submit something untrue.
-    "current_company": os.getenv("ANSWER_CURRENT_COMPANY", ""),
-    "current_title": os.getenv("ANSWER_CURRENT_TITLE", ""),
-    # Split city/country: ATS location dropdowns ask for them separately, and a
-    # combined string matches no option.
-    "city": os.getenv("ANSWER_CITY", "Istanbul"),
-    "country": os.getenv("ANSWER_COUNTRY", "Turkey"),
-    # Residency/tax questions ("are you a US tax resident?") follow from where the
-    # candidate actually lives.
-    "us_tax_resident": os.getenv("ANSWER_US_TAX_RESIDENT", "no"),
-    "demographic": os.getenv("ANSWER_DEMOGRAPHIC", "Decline to self-identify"),
-    "referral_source": os.getenv("ANSWER_REFERRAL", "LinkedIn"),
-    "linkedin": os.getenv("APPLICANT_LINKEDIN", ""),
-    "website": os.getenv("APPLICANT_WEBSITE", ""),
-    "phone": os.getenv("APPLICANT_PHONE", ""),
-    "email": os.getenv("APPLICANT_EMAIL", ""),
-    "name": os.getenv("APPLICANT_NAME", ""),
-    "first_name": os.getenv("APPLICANT_FIRST_NAME", ""),
-    "last_name": os.getenv("APPLICANT_LAST_NAME", ""),
-}
-
-# --- Resume ---
-RESUME_PATH = BASE_DIR / os.getenv("RESUME_PATH", "config/resume.pdf")
-
 # --- Database ---
 DB_PATH = Path(os.getenv("DB_PATH", str(BASE_DIR / "hunter.db")))
 DB_BACKUP_DIR = BASE_DIR / "backups"
 
-# --- Reminder ---
+# --- Follow-up window (DB-only; used by tracker.get_jobs_needing_followup) ---
 FOLLOWUP_DAYS = int(os.getenv("FOLLOWUP_DAYS", "7"))
 
-# Search queries — default tailored for Utku's PM profile; override via env
-# (comma-separated) for a different target, e.g. a marketing profile.
+# Search queries for query-driven sources (Wellfound). Default mirrors the
+# narrow ROLE_MATCH_KEYWORDS target; override via env (comma-separated) for a
+# different target, e.g. a marketing profile.
 SEARCH_QUERIES = _csv_list(
     "SEARCH_QUERIES",
-    "Senior Product Manager,Product Manager Fintech,Product Manager Marketplace,"
-    "Product Manager Blockchain,Product Manager SaaS,Senior PM Remote,"
-    "Product Lead,Head of Product",
+    "Senior Product Manager,Head of Product",
 )
 
 # RemoteOK is tag-driven: its API is /api?tag=<tag>. Multi-word SEARCH_QUERIES turn
 # into dead tags (e.g. "senior-product-manager"), so RemoteOK uses these real tags
-# instead. The PM title filter (ROLE_MATCH_KEYWORDS) still trims the broad "product"
-# tag down to manager-level roles.
-REMOTEOK_TAGS = _csv_list("REMOTEOK_TAGS", "product-manager,product")
+# instead. crypto/web3/defi widen the net into web3 companies; the title filter
+# (ROLE_MATCH_KEYWORDS) still trims every tag down to the target roles.
+REMOTEOK_TAGS = _csv_list("REMOTEOK_TAGS", "product-manager,product,crypto,web3,defi")
 
 # We Work Remotely category RSS feeds (remote-only). The Product feed is broad —
-# the PM title filter trims it to manager-level roles.
+# the title filter trims it to the target roles.
 WEWORKREMOTELY_FEEDS = _csv_list(
     "WEWORKREMOTELY_FEEDS",
     "https://weworkremotely.com/categories/remote-product-jobs.rss",
 )
-
-# Resume text — loaded from file at runtime, NOT hardcoded in source.
-# The "missing resume" warning is emitted from validate_config(), not at import,
-# so it doesn't spam during tests or unrelated CLI commands. A profile-specific
-# file (resume.<profile>.txt) is preferred so one profile's resume can't shadow
-# another's; then the shared resume.txt; then the RESUME_TEXT env. Each file is
-# looked for under config/ (committed-style local path) and on the /data volume
-# (prod: uploaded out-of-band, like .env.<profile> — keeps PII off git/secrets).
-_resume_candidates = []
-if HUNTER_PROFILE:
-    _resume_candidates.append(BASE_DIR / "config" / f"resume.{HUNTER_PROFILE}.txt")
-    _resume_candidates.append(Path("/data") / f"resume.{HUNTER_PROFILE}.txt")
-_resume_candidates.append(BASE_DIR / "config" / "resume.txt")
-_resume_candidates.append(Path("/data") / "resume.txt")
-RESUME_TEXT = os.getenv("RESUME_TEXT", "")
-for _resume_file in _resume_candidates:
-    if _resume_file.exists():
-        RESUME_TEXT = _resume_file.read_text(encoding="utf-8")
-        break
-
-
-def validate_config(command: str) -> list[str]:
-    """Validate required config for a given command. Returns list of errors."""
-    errors = []
-
-    if command in ("hunt", "bot"):
-        if not TELEGRAM_BOT_TOKEN:
-            errors.append("TELEGRAM_BOT_TOKEN is required. Talk to @BotFather on Telegram.")
-        if not TELEGRAM_CHAT_ID:
-            errors.append("TELEGRAM_CHAT_ID is required. Send a message to your bot, then check getUpdates API.")
-
-    if command in ("apply", "bot"):
-        if not ANTHROPIC_API_KEY:
-            logging.getLogger(__name__).warning(
-                "ANTHROPIC_API_KEY not set. Cover letters will use fallback template."
-            )
-        if not RESUME_TEXT:
-            errors.append("Resume text not found. Create config/resume.txt or set RESUME_TEXT env var.")
-
-    if command in ("apply", "hunt", "bot"):
-        if not LINKEDIN_SESSION_COOKIE:
-            logging.getLogger(__name__).warning(
-                "LINKEDIN_SESSION_COOKIE not set. LinkedIn scraping/apply will be limited."
-            )
-
-    return errors

@@ -1,6 +1,5 @@
-"""Tests for scraper/base.py and scraper/linkedin.py."""
+"""Tests for scraper/base.py."""
 from scraper.base import ApiSource, BaseScraper, BrowserSource, JobSource
-from scraper.linkedin import LinkedInScraper
 from scraper.remoteok import RemoteOKScraper
 
 
@@ -135,34 +134,3 @@ class TestApiSourceGetJson:
             assert s is src
             assert s._session is not None  # real aiohttp session, no network
         assert src._session.closed
-
-
-class TestLinkedInCleanUrl:
-    def test_strips_query_params(self):
-        url = "https://www.linkedin.com/jobs/view/12345?trk=abc&refId=xyz"
-        assert LinkedInScraper._clean_linkedin_url(url) == "https://www.linkedin.com/jobs/view/12345"
-
-    def test_adds_base_url_for_relative(self):
-        url = "/jobs/view/12345"
-        assert LinkedInScraper._clean_linkedin_url(url) == "https://www.linkedin.com/jobs/view/12345"
-
-    def test_absolute_url_unchanged(self):
-        url = "https://www.linkedin.com/jobs/view/12345"
-        assert LinkedInScraper._clean_linkedin_url(url) == url
-
-    def test_relative_with_query_params(self):
-        url = "/jobs/view/99999?utm_source=test"
-        assert LinkedInScraper._clean_linkedin_url(url) == "https://www.linkedin.com/jobs/view/99999"
-
-    def test_empty_url(self):
-        assert LinkedInScraper._clean_linkedin_url("") == ""
-
-
-class TestLinkedInScraperStructure:
-    def test_has_guest_and_auth_methods(self):
-        """LinkedIn scraper should have both auth and guest scrape paths."""
-        assert hasattr(LinkedInScraper, '_scrape_authenticated')
-        assert hasattr(LinkedInScraper, '_scrape_guest')
-
-    def test_platform_name(self):
-        assert LinkedInScraper.platform_name == "linkedin"
